@@ -225,6 +225,10 @@ pub const Vm = struct {
     gensym_counter: u64 = 0,
     last_error: []const u8 = "error",
 
+    // Cons cell bump allocator — avoids per-cell arena overhead
+    cell_slab: []Cell = &.{},
+    cell_next: usize = 0,
+
     pub fn init(allocator: std.mem.Allocator) !Vm {
         var pool = InternPool.init(allocator);
         const s_defun = try pool.intern("defun");
@@ -291,8 +295,15 @@ pub const Vm = struct {
         };
     }
 
+    const CELL_SLAB_SIZE = 64 * 1024; // 64K cells per slab
+
     pub fn makeCons(self: *Vm, car: Value, cdr: Value) !Value {
-        const cell = try self.allocator.create(Cell);
+        if (self.cell_next >= self.cell_slab.len) {
+            self.cell_slab = try self.allocator.alloc(Cell, CELL_SLAB_SIZE);
+            self.cell_next = 0;
+        }
+        const cell = &self.cell_slab[self.cell_next];
+        self.cell_next += 1;
         cell.* = .{ .car = car, .cdr = cdr };
         return Value{ .cons = cell };
     }
