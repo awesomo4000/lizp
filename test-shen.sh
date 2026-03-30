@@ -115,27 +115,43 @@ if [ "$1" = "--bench" ]; then
     echo "=== Benchmarks ==="
     echo ""
 
-    # Boot time (3 runs, take median)
-    echo -n "Boot time:     "
-    for i in 1 2 3; do
-        /usr/bin/time -f '%e' sh -c "printf 'quit\n' | $SHEN boot $KL 2>/dev/null" 2>&1
-    done | sort -n | head -2 | tail -1 | xargs printf '%ss\n'
+    # Boot time via hyperfine (proper statistical measurement)
+    hyperfine --warmup 1 --runs 5 \
+        "printf 'quit\n' | $SHEN boot $KL 2>/dev/null"
 
-    # Memory
+    # RSS
     echo -n "Boot RSS:      "
     /usr/bin/time -f '%M KB' sh -c "printf 'quit\n' | $SHEN boot $KL 2>/dev/null" 2>&1 | tail -1
 
-    # Fibonacci benchmark
-    echo -n "fib(25):       "
-    /usr/bin/time -f '%e' sh -c "printf '(defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))\n(fib 25)\nquit\n' | $SHEN boot $KL 2>/dev/null" 2>&1 | tail -1 | xargs printf '%ss\n'
+    # Compute benchmarks: individual runs with timeout, Shen-level CPU timing
+    echo ""
+    echo "--- Compute (CPU time via get-time) ---"
 
-    # List operations
-    echo -n "append 10k:    "
-    /usr/bin/time -f '%e' sh -c "printf '(defun range (n) (if (= n 0) () (cons n (range (- n 1)))))\n(length (append (range 5000) (range 5000)))\nquit\n' | $SHEN boot $KL 2>/dev/null" 2>&1 | tail -1 | xargs printf '%ss\n'
+    run_bench() {
+        local name="$1" setup="$2" expr="$3"
+        local result
+        result=$(printf '%s\n%s\nquit\n' "$setup" \
+            "(let T0 (get-time run) _ $expr T1 (get-time run) (cn \"BENCH \" (str (- T1 T0))))" \
+            | timeout 30 $SHEN boot $KL 2>/dev/null | grep '^shen>> BENCH' | sed 's/^shen>> BENCH //')
+        if [ -n "$result" ]; then
+            printf '  %-14s %ss\n' "$name" "$result"
+        else
+            printf '  %-14s TIMEOUT\n' "$name"
+        fi
+    }
 
-    # Type checker
-    echo -n "typecheck:     "
-    /usr/bin/time -f '%e' sh -c "printf '(shen.typecheck (lambda x (+ x 1)) (number --> number))\nquit\n' | $SHEN boot $KL 2>/dev/null" 2>&1 | tail -1 | xargs printf '%ss\n'
+    run_bench "fib(25)" \
+        "(define fib 0 -> 0 1 -> 1 N -> (+ (fib (- N 1)) (fib (- N 2))))" \
+        "(fib 25)"
+
+    run_bench "append 10k" \
+        "(define range-h 0 Acc -> Acc N Acc -> (range-h (- N 1) (cons N Acc)))
+(define range N -> (range-h N []))" \
+        "(length (append (range 5000) (range 5000)))"
+
+    run_bench "typecheck" \
+        "" \
+        "(shen.typecheck (lambda x (+ x 1)) (number --> number))"
 
     echo ""
 fi
