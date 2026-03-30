@@ -203,6 +203,8 @@ pub const Vm = struct {
     sym_true: u32,
     sym_false: u32,
 
+    gensym_counter: u64 = 0,
+
     pub fn init(allocator: std.mem.Allocator) !Vm {
         var pool = InternPool.init(allocator);
         const s_defun = try pool.intern("defun");

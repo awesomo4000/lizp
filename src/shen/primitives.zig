@@ -317,6 +317,178 @@ fn getTime(args: []const Value, p: *anyopaque) anyerror!Value {
     return error.TypeError;
 }
 
+// --- Additional primitives needed for bootstrap ---
+
+fn notFn(args: []const Value, _: *anyopaque) anyerror!Value {
+    return Value{ .boolean = !arg(args, 0).isTruthy() };
+}
+
+fn symbolP(args: []const Value, _: *anyopaque) anyerror!Value {
+    return Value{ .boolean = arg(args, 0) == .symbol };
+}
+
+fn absvectorP(args: []const Value, _: *anyopaque) anyerror!Value {
+    return Value{ .boolean = arg(args, 0) == .vector };
+}
+
+fn boundP(args: []const Value, p: *anyopaque) anyerror!Value {
+    const s = arg(args, 0);
+    if (s != .symbol) return Value{ .boolean = false };
+    return Value{ .boolean = vm(p).globals.get(s.symbol) != null };
+}
+
+fn gensym(args: []const Value, p: *anyopaque) anyerror!Value {
+    const prefix = arg(args, 0);
+    const m = vm(p);
+    m.gensym_counter += 1;
+    var buf: [64]u8 = undefined;
+    const prefix_str = if (prefix == .symbol) m.pool.getName(prefix.symbol) else "G";
+    const s = std.fmt.bufPrint(&buf, "{s}{d}", .{ prefix_str, m.gensym_counter }) catch "G?";
+    return m.internSym(s);
+}
+
+fn concat_(args: []const Value, p: *anyopaque) anyerror!Value {
+    const a = arg(args, 0);
+    const b = arg(args, 1);
+    const m = vm(p);
+    const a_str = if (a == .symbol) m.pool.getName(a.symbol) else "";
+    const b_str = if (b == .symbol) m.pool.getName(b.symbol) else "";
+    const result = try m.allocator.alloc(u8, a_str.len + b_str.len);
+    @memcpy(result[0..a_str.len], a_str);
+    @memcpy(result[a_str.len..], b_str);
+    return m.internSym(result);
+}
+
+fn length_(args: []const Value, _: *anyopaque) anyerror!Value {
+    const v = arg(args, 0);
+    if (v == .string) return Value{ .integer = @intCast(v.string.len) };
+    // List length
+    var count: i64 = 0;
+    var cur = v;
+    while (cur == .cons) {
+        count += 1;
+        cur = cur.cons.cdr;
+    }
+    return Value{ .integer = count };
+}
+
+fn pr_(args: []const Value, _: *anyopaque) anyerror!Value {
+    const s = arg(args, 0);
+    // arg 1 is the stream, ignore for now and print to stderr
+    if (s == .string) {
+        std.debug.print("{s}", .{s.string});
+    }
+    return s;
+}
+
+fn nl(args: []const Value, _: *anyopaque) anyerror!Value {
+    _ = args;
+    std.debug.print("\n", .{});
+    return Value{ .integer = 0 };
+}
+
+fn stoutput_(_: []const Value, _: *anyopaque) anyerror!Value {
+    return .nil; // stub — stream placeholder
+}
+
+fn stinput_(_: []const Value, _: *anyopaque) anyerror!Value {
+    return .nil; // stub — stream placeholder
+}
+
+fn hdstr_(args: []const Value, p: *anyopaque) anyerror!Value {
+    const s = arg(args, 0);
+    if (s != .string or s.string.len == 0) return error.TypeError;
+    return vm(p).makeString(s.string[0..1]);
+}
+
+fn shenApp(args: []const Value, p: *anyopaque) anyerror!Value {
+    const v = arg(args, 0);
+    const suffix = arg(args, 1);
+    // arg 2 is formatting mode, ignore for now
+    const m = vm(p);
+    const v_str = try printer.valueToString(m, v);
+    const suffix_str = if (suffix == .string) suffix.string else "";
+    const result = try m.allocator.alloc(u8, v_str.len + suffix_str.len);
+    @memcpy(result[0..v_str.len], v_str);
+    @memcpy(result[v_str.len..], suffix_str);
+    return Value{ .string = result };
+}
+
+fn thaw(args: []const Value, p: *anyopaque) anyerror!Value {
+    const f = arg(args, 0);
+    return eval_mod.apply(f, &.{}, vm(p));
+}
+
+fn mapFn(args: []const Value, p: *anyopaque) anyerror!Value {
+    const f = arg(args, 0);
+    const lst = arg(args, 1);
+    const m = vm(p);
+    var result: Value = .nil;
+    var items = std.ArrayListUnmanaged(Value){};
+    var cur = lst;
+    while (cur == .cons) {
+        const val = try eval_mod.apply(f, &[_]Value{cur.cons.car}, m);
+        try items.append(m.allocator, val);
+        cur = cur.cons.cdr;
+    }
+    // Build cons list in reverse
+    var i = items.items.len;
+    while (i > 0) {
+        i -= 1;
+        result = try m.makeCons(items.items[i], result);
+    }
+    items.deinit(m.allocator);
+    return result;
+}
+
+fn reverseFn(args: []const Value, p: *anyopaque) anyerror!Value {
+    const lst = arg(args, 0);
+    const m = vm(p);
+    var result: Value = .nil;
+    var cur = lst;
+    while (cur == .cons) {
+        result = try m.makeCons(cur.cons.car, result);
+        cur = cur.cons.cdr;
+    }
+    return result;
+}
+
+fn appendFn(args: []const Value, p: *anyopaque) anyerror!Value {
+    const a = arg(args, 0);
+    const b = arg(args, 1);
+    if (a == .nil) return b;
+    const m = vm(p);
+    // Collect a into array, then build from end
+    var items = std.ArrayListUnmanaged(Value){};
+    var cur = a;
+    while (cur == .cons) {
+        try items.append(m.allocator, cur.cons.car);
+        cur = cur.cons.cdr;
+    }
+    var result = b;
+    var i = items.items.len;
+    while (i > 0) {
+        i -= 1;
+        result = try m.makeCons(items.items[i], result);
+    }
+    items.deinit(m.allocator);
+    return result;
+}
+
+fn shenFillvector(args: []const Value, _: *anyopaque) anyerror!Value {
+    const vec = arg(args, 0);
+    const start = arg(args, 1);
+    const end = arg(args, 2);
+    const fill = arg(args, 3);
+    if (vec != .vector or start != .integer or end != .integer) return error.TypeError;
+    var i: usize = @intCast(start.integer);
+    const e: usize = @intCast(end.integer);
+    while (i <= e) : (i += 1) {
+        if (i < vec.vector.data.len) vec.vector.data[i] = fill;
+    }
+    return vec;
+}
+
 // --- Type hint (identity) ---
 
 fn typeFn(args: []const Value, _: *anyopaque) anyerror!Value {
@@ -372,6 +544,25 @@ const primitives_table = [_]PrimDef{
     .{ .name = "close", .func = native(closeStream) },
     .{ .name = "get-time", .func = native(getTime) },
     .{ .name = "type", .func = native(typeFn) },
+    // Additional primitives for bootstrap
+    .{ .name = "not", .func = native(notFn) },
+    .{ .name = "symbol?", .func = native(symbolP) },
+    .{ .name = "absvector?", .func = native(absvectorP) },
+    .{ .name = "bound?", .func = native(boundP) },
+    .{ .name = "gensym", .func = native(gensym) },
+    .{ .name = "concat", .func = native(concat_) },
+    .{ .name = "length", .func = native(length_) },
+    .{ .name = "pr", .func = native(pr_) },
+    .{ .name = "nl", .func = native(nl) },
+    .{ .name = "stoutput", .func = native(stoutput_) },
+    .{ .name = "stinput", .func = native(stinput_) },
+    .{ .name = "hdstr", .func = native(hdstr_) },
+    .{ .name = "shen.app", .func = native(shenApp) },
+    .{ .name = "thaw", .func = native(thaw) },
+    .{ .name = "map", .func = native(mapFn) },
+    .{ .name = "reverse", .func = native(reverseFn) },
+    .{ .name = "append", .func = native(appendFn) },
+    .{ .name = "shen.fillvector", .func = native(shenFillvector) },
 };
 
 pub fn registerPrimitives(m: *Vm) !void {
