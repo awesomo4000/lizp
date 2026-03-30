@@ -5,12 +5,7 @@
 (trap-error (stlib.initialise-environment) (lambda E ()))
 (trap-error (shen.x.features.initialise ()) (lambda E ()))
 
-\* Build lambda forms for all functions with known arities *\
-(shen.for-each
-  (lambda X
-    (trap-error (shen.set-lambda-form-entry (shen.lambda-entry X))
-                (lambda E ())))
-  (value shen.*system*))
+\* Lambda forms are built on demand by the patched fn function below. *\
 
 \* Macro: quote the type argument in declare so it isn't evaluated.
    Rewrites (declare Name Type) to (shen.declare* Name QuotedType)
@@ -41,10 +36,6 @@
 
 (shen.record-macro shen.declare-macro (lambda X (shen.declare-macro X)))
 (shen.record-macro shen.typecheck-macro (lambda X (shen.typecheck-macro X)))
-
-\* type is handled as a primitive — just returns the value.
-   The type checker handles (type X T) through shen.system-S-h
-   when expressions go through shen.typecheck. *\
 
 \* Patch fn to auto-build lambda forms on miss *\
 (defun fn (X)

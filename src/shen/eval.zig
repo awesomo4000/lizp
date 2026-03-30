@@ -155,17 +155,24 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                     }
                 }
 
-                // Function application
-                const func = try eval(head, current_env, vm);
+                // Function application — fast path for symbol-named functions
+                const func = if (head == .symbol)
+                    (vm.functions.get(head.symbol) orelse
+                        if (current_env.lookup(head.symbol)) |v| v else Value{ .symbol = head.symbol })
+                else
+                    try eval(head, current_env, vm);
+
                 const args = try evalList(tail, current_env, vm);
 
-                // TCO: if applying a closure in tail position, reuse the loop
+                if (func == .native_fn) {
+                    return types.callNative(func.native_fn, args, vm.asOpaque());
+                }
+
                 if (func == .closure) {
                     const cls = func.closure;
                     const total_args = cls.applied.len + args.len;
 
                     if (total_args < cls.arity) {
-                        // Partial application
                         return vm.makePartial(cls, args);
                     }
 
@@ -175,30 +182,11 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                         continue; // TCO
                     }
 
-                    // Over-application: apply fully, then apply remaining args
+                    // Over-application
                     const needed = cls.arity - cls.applied.len;
                     const new_env = try bindClosureArgs(cls, args[0..needed], vm);
                     const intermediate = try eval(cls.body, new_env, vm);
                     return apply(intermediate, args[needed..], vm);
-                }
-
-                if (func == .native_fn) {
-                    return types.callNative(func.native_fn, args, vm.asOpaque());
-                }
-
-                // Symbol might name a global function
-                if (func == .symbol) {
-                    if (vm.functions.get(func.symbol)) |f| {
-                        if (f == .closure) {
-                            const cls = f.closure;
-                            if (cls.applied.len + args.len == cls.arity) {
-                                current_env = try bindClosureArgs(cls, args, vm);
-                                current = cls.body;
-                                continue :tco;
-                            }
-                        }
-                        return apply(f, args, vm);
-                    }
                 }
 
                 return error.NotAFunction;
@@ -257,8 +245,28 @@ fn listNth(list: Value, n: usize) Value {
 }
 
 fn evalList(list: Value, env: *Env, vm: *Vm) anyerror![]const Value {
-    var items = std.ArrayListUnmanaged(Value){};
+    // Fast path: use stack buffer for small arg lists (covers 99% of calls)
+    var stack_buf: [8]Value = undefined;
+    var count: usize = 0;
     var cur = list;
+
+    // First try stack buffer
+    while (cur == .cons and count < stack_buf.len) {
+        stack_buf[count] = try eval(cur.cons.car, env, vm);
+        count += 1;
+        cur = cur.cons.cdr;
+    }
+
+    if (cur != .cons) {
+        // Fits in stack buffer — copy to arena (needed for lifetime)
+        const result = try vm.allocator.alloc(Value, count);
+        @memcpy(result, stack_buf[0..count]);
+        return result;
+    }
+
+    // Rare: more than 8 args — fall back to dynamic
+    var items = std.ArrayListUnmanaged(Value){};
+    try items.appendSlice(vm.allocator, stack_buf[0..count]);
     while (cur == .cons) {
         const val = try eval(cur.cons.car, env, vm);
         try items.append(vm.allocator, val);

@@ -119,6 +119,7 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
     const env = try vm.allocator.create(Env);
     env.* = Env.init(null);
     var loaded: usize = 0;
+    var timer = std.time.Timer.start() catch unreachable;
 
     for (boot_order) |filename| {
         var path_buf: [512]u8 = undefined;
@@ -158,10 +159,12 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
         }
     }
 
-    std.debug.print("\nLoaded {d}/{d} files.\n", .{ loaded, boot_order.len });
+    const load_ms = timer.read() / 1_000_000;
+    std.debug.print("\nLoaded {d}/{d} files in {d}ms.\n", .{ loaded, boot_order.len, load_ms });
 
     // Initialize environment
     std.debug.print("Initializing...", .{});
+    timer.reset();
 
     // Populate shen.*system* from all defined functions (before init reads it)
     {
@@ -187,7 +190,8 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
         evalSrc(init_content, env, vm);
     }
 
-    std.debug.print(" done.\n", .{});
+    const init_ms = timer.read() / 1_000_000;
+    std.debug.print(" done ({d}ms).\n", .{init_ms});
 
     std.debug.print("Shen ready.\n\n", .{});
 
