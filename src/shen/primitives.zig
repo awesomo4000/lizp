@@ -234,9 +234,10 @@ fn addressGet(args: []const Value, _: *anyopaque) anyerror!Value {
 
 // --- Errors ---
 
-fn simpleError(args: []const Value, _: *anyopaque) anyerror!Value {
+fn simpleError(args: []const Value, p: *anyopaque) anyerror!Value {
     const s = arg(args, 0);
     if (s != .string) return error.TypeError;
+    vm(p).last_error = s.string;
     return error.ShenError;
 }
 

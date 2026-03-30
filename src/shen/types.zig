@@ -204,6 +204,7 @@ pub const Vm = struct {
     sym_false: u32,
 
     gensym_counter: u64 = 0,
+    last_error: []const u8 = "error",
 
     pub fn init(allocator: std.mem.Allocator) !Vm {
         var pool = InternPool.init(allocator);

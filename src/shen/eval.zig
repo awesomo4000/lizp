@@ -34,7 +34,7 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
     var current_env = env;
 
     // TCO loop — tail calls restart here instead of recursing
-    while (true) {
+    tco: while (true) {
         switch (current) {
             // Self-evaluating
             .nil, .boolean, .integer, .float, .string,
@@ -47,11 +47,8 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                 if (sym == vm.sym_true) return Value{ .boolean = true };
                 if (sym == vm.sym_false) return Value{ .boolean = false };
 
-                // Lexical scope first
+                // Lexical scope only — globals accessed via (value sym)
                 if (current_env.lookup(sym)) |val| return val;
-
-                // Global symbols (set/value)
-                if (vm.globals.get(sym)) |val| return val;
 
                 // Symbols self-evaluate in Kλ if not bound
                 return current;
@@ -95,18 +92,14 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                         while (clauses == .cons) {
                             const clause = clauses.cons.car;
                             const test_expr = listNth(clause, 0);
-                            const body_expr = listNth(clause, 1);
                             const test_val = try eval(test_expr, current_env, vm);
                             if (test_val.isTruthy()) {
-                                current = body_expr;
-                                continue; // can't continue outer — use a flag
-                                // Actually, we need to break out and continue the TCO loop
+                                current = listNth(clause, 1);
+                                continue :tco;
                             }
                             clauses = clauses.cons.cdr;
                         }
-                        // Shen cond: in Kλ, if we hit a cond and found a true branch,
-                        // we need to jump to the TCO loop. Let's restructure:
-                        return evalCond(tail, current_env, vm);
+                        return error.BadSpecialForm;
                     }
 
                     if (sym == vm.sym_let) {
@@ -150,9 +143,12 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                         const result = eval(body, current_env, vm);
                         if (result) |val| {
                             return val;
-                        } else |_| {
-                            // Apply handler to the error
-                            const err_val = try vm.makeError("error");
+                        } else |err| {
+                            const msg = if (err == error.ShenError)
+                                vm.last_error
+                            else
+                                @errorName(err);
+                            const err_val = try vm.makeError(msg);
                             const evaled_handler = try eval(handler, current_env, vm);
                             return apply(evaled_handler, &[_]Value{err_val}, vm);
                         }
@@ -217,6 +213,25 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                 // Symbol might name a global function
                 if (func == .symbol) {
                     if (vm.functions.get(func.symbol)) |f| {
+                        if (f == .closure) {
+                            const cls = f.closure;
+                            const total_args = cls.applied.len + args.len;
+                            if (total_args == cls.arity) {
+                                const new_env = try makeEnv(vm, cls.env);
+                                var arg_idx: usize = 0;
+                                for (cls.params) |param| {
+                                    const val = if (arg_idx < cls.applied.len)
+                                        cls.applied[arg_idx]
+                                    else
+                                        args[arg_idx - cls.applied.len];
+                                    try new_env.bind(vm.allocator, param, val);
+                                    arg_idx += 1;
+                                }
+                                current = cls.body;
+                                current_env = new_env;
+                                continue :tco;
+                            }
+                        }
                         return apply(f, args, vm);
                     }
                 }
