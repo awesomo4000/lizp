@@ -64,6 +64,13 @@ const lizp = @import("lizp");
 // Comptime eval
 const result = lizp.run("(let [x 10 y 20] (+ x y))"); // "30"
 
+// Multi-expression programs with def/defn
+const result2 = lizp.runProgram(
+    \\(def base 100)
+    \\(defn add-to-base [x] (+ base x))
+    \\(add-to-base 10)
+); // "110"
+
 // Compile to native
 const abs_ = lizp.Fn1("(if (< x 0) (- 0 x) x)", "x");
 const diff_sq = lizp.Fn2("(* (+ a b) (- a b))", "a", "b");
