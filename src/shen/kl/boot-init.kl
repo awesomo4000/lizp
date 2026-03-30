@@ -12,6 +12,30 @@
                 (lambda E ())))
   (value shen.*system*))
 
+\* Macro: quote the type argument in declare so it isn't evaluated.
+   Rewrites (declare Name Type) to (shen.declare* Name QuotedType)
+   to avoid re-expansion. *\
+(defun shen.declare* (Name Type) (declare Name Type))
+
+(defun shen.declare-macro (V)
+  (if (and (cons? V) (and (= declare (hd V))
+          (and (cons? (tl V)) (and (cons? (tl (tl V)))
+                                   (= () (tl (tl (tl V))))))))
+      (cons shen.declare* (cons (hd (tl V))
+                           (cons (shen.rcons_form (hd (tl (tl V)))) ())))
+      V))
+
+
+(shen.record-macro shen.declare-macro (lambda X (shen.declare-macro X)))
+
+\* Override type to actually typecheck when tc+ is on *\
+(defun type (X T)
+  (if (value shen.*tc*)
+      (if (= false (shen.typecheck X T))
+          (simple-error (cn "type error: " (shen.app X (cn " is not of type " (shen.app T "" shen.a)) shen.a)))
+          X)
+      X))
+
 \* Patch fn to auto-build lambda forms on miss *\
 (defun fn (X)
   (cond ((= (arity X) 0) (X))
