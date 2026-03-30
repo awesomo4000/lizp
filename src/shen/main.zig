@@ -165,10 +165,53 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
 
     std.debug.print("\nLoaded {d}/{d} files.\n", .{ loaded, boot_order.len });
 
+    // Initialize environment (globals, arity table, property vector, etc.)
+    std.debug.print("Initializing...", .{});
+
+    const boot_phases = [_][]const u8{
+        // Phase 1: core environment setup
+        "(shen.initialise-environment)",
+        "(trap-error (stlib.initialise-environment) (lambda E ()))",
+        "(trap-error (shen.x.features.initialise ()) (lambda E ()))",
+    };
+    for (boot_phases) |src| {
+        evalSrc(src, &env, vm);
+    }
+
+    // Phase 2: populate shen.*system* from all defined functions
+    {
+        var sys_list: Value = .nil;
+        var it = vm.functions.iterator();
+        while (it.next()) |entry| {
+            sys_list = vm.makeCons(Value{ .symbol = entry.key_ptr.* }, sys_list) catch .nil;
+        }
+        const sys_sym = vm.pool.intern("shen.*system*") catch unreachable;
+        vm.globals.put(vm.allocator, sys_sym, sys_list) catch {};
+    }
+
+    // Phase 3: build lambda forms for all known functions
+    evalSrc(
+        \\(shen.for-each
+        \\  (lambda X
+        \\    (trap-error (shen.set-lambda-form-entry (shen.lambda-entry X))
+        \\                (lambda E ())))
+        \\  (value shen.*system*))
+    , &env, vm);
+
+    std.debug.print(" done.\n", .{});
+
     std.debug.print("Shen ready.\n\n", .{});
 
     // Drop into REPL
     repl_with_env(vm, &env);
+}
+
+fn evalSrc(src: []const u8, env: *Env, vm: *Vm) void {
+    var rd = Reader.init(src, vm);
+    const exprs = rd.readAll() catch return;
+    for (exprs) |expr| {
+        _ = eval_mod.eval(expr, env, vm) catch {};
+    }
 }
 
 fn repl_with_env(vm: *Vm, env: *Env) void {

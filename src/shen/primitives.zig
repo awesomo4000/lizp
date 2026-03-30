@@ -250,8 +250,10 @@ fn errorToString(args: []const Value, _: *anyopaque) anyerror!Value {
 // --- Eval ---
 
 fn evalKl(args: []const Value, p: *anyopaque) anyerror!Value {
-    var env = Env.init(null);
-    return eval_mod.eval(arg(args, 0), &env, vm(p));
+    const m = vm(p);
+    const env = try m.allocator.create(Env);
+    env.* = Env.init(null);
+    return eval_mod.eval(arg(args, 0), env, m);
 }
 
 // --- Streams ---
