@@ -1,3 +1,4 @@
 research/
 zig-out/
 .zig-cache/
+src/shen/tests/
