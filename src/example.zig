@@ -11,6 +11,14 @@ const fib_10 = lizp.run(
     \\  (fib fib 10))
 );
 
+// Multi-expression program with def/defn
+const program_result = lizp.lisp.runProgram(
+    \\(def x 10)
+    \\(def y 20)
+    \\(defn add-em [a b] (+ a b))
+    \\(add-em x y)
+);
+
 // Lisp-compiled native functions — no interpretation at runtime
 const square = lizp.Fn1("(* x x)", "x");
 const abs_ = lizp.Fn1("(if (< x 0) (- 0 x) x)", "x");
@@ -22,6 +30,7 @@ pub fn main() void {
     print("=== comptime eval ===\n", .{});
     print("(+ 1 2) = {s}\n", .{answer});
     print("(fib 10) = {s}\n", .{fib_10});
+    print("def/defn program = {s}\n", .{program_result});
 
     print("\n=== native compiled functions ===\n", .{});
     print("square(7) = {d}\n", .{square(7)});

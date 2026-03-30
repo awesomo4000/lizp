@@ -3,6 +3,7 @@ pub const compiler = @import("compiler.zig");
 
 // Re-export the main entry points for convenience
 pub const run = lisp.run;
+pub const runProgram = lisp.runProgram;
 pub const read = lisp.read;
 pub const eval = lisp.eval;
 pub const printValue = lisp.printValue;

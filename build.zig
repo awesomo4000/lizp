@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
 
     // Tests
     const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/lizp.zig"),
+        .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
     });

@@ -26,19 +26,21 @@ pub const Cons = struct {
 pub const Lambda = struct {
     params: *const Value, // list of symbols
     body: *const Value,
-    env: *const Env,
+    env: Env, // captured environment (by value, no pointer)
 };
 
 pub const Builtin = struct {
     name: []const u8,
-    func: *const fn (args: *const Value, env: *const Env) Value,
+    func: *const fn (args: *const Value, env: Env) Value,
 };
 
 // --- Environment ---
+// Flat binding array. Extension is concatenation. Lookup scans
+// backwards so later bindings shadow earlier ones. No parent
+// pointers means no comptime pointer lifetime issues.
 
 pub const Env = struct {
     bindings: []const Binding,
-    parent: ?*const Env,
 };
 
 pub const Binding = struct {
@@ -46,16 +48,17 @@ pub const Binding = struct {
     val: Value,
 };
 
-fn envLookup(env: *const Env, name: []const u8) Value {
-    for (env.bindings) |b| {
-        if (strEql(b.name, name)) return b.val;
+fn envLookup(env: Env, name: []const u8) Value {
+    var i = env.bindings.len;
+    while (i > 0) {
+        i -= 1;
+        if (strEql(env.bindings[i].name, name)) return env.bindings[i].val;
     }
-    if (env.parent) |p| return envLookup(p, name);
     @compileError("unbound symbol: " ++ name);
 }
 
-fn envExtend(parent: *const Env, bindings: []const Binding) Env {
-    return Env{ .bindings = bindings, .parent = parent };
+fn envExtend(env: Env, new_bindings: []const Binding) Env {
+    return Env{ .bindings = env.bindings ++ new_bindings };
 }
 
 // --- Helpers ---
@@ -267,7 +270,7 @@ fn tryParseInt(s: []const u8) ?i64 {
 
 // --- Eval ---
 
-pub fn eval(expr: Value, env: *const Env) Value {
+pub fn eval(expr: Value, env: Env) Value {
     return switch (expr) {
         .nil, .integer, .boolean => expr,
         .symbol => |name| {
@@ -279,7 +282,7 @@ pub fn eval(expr: Value, env: *const Env) Value {
     };
 }
 
-fn evalList(expr: Value, env: *const Env) Value {
+fn evalList(expr: Value, env: Env) Value {
     const head_expr = car(expr);
     const args_expr = cdr(expr);
 
@@ -318,11 +321,11 @@ fn evalList(expr: Value, env: *const Env) Value {
         }
 
         if (strEql(name, "def")) {
-            @compileError("def not supported in comptime eval (no mutation)");
+            @compileError("def is a top-level form, use runProgram");
         }
 
         if (strEql(name, "defn")) {
-            @compileError("defn not supported in comptime eval (no mutation)");
+            @compileError("defn is a top-level form, use runProgram");
         }
     }
 
@@ -330,10 +333,10 @@ fn evalList(expr: Value, env: *const Env) Value {
     const func = eval(head_expr, env);
     const evaled_args = evalArgs(args_expr, env);
 
-    return apply(func, evaled_args, env);
+    return apply(func, evaled_args);
 }
 
-fn evalDo(exprs: Value, env: *const Env) Value {
+fn evalDo(exprs: Value, env: Env) Value {
     if (exprs == .nil) return NIL;
     const val = eval(car(exprs), env);
     const rest = cdr(exprs);
@@ -341,15 +344,15 @@ fn evalDo(exprs: Value, env: *const Env) Value {
     return evalDo(rest, env);
 }
 
-fn evalLet(args: Value, env: *const Env) Value {
+fn evalLet(args: Value, env: Env) Value {
     const bindings_list = car(args);
     const body = cadr(args);
     const new_env = evalLetBindings(bindings_list, env);
-    return eval(body, &new_env);
+    return eval(body, new_env);
 }
 
-fn evalLetBindings(bindings: Value, env: *const Env) Env {
-    if (bindings == .nil) return env.*;
+fn evalLetBindings(bindings: Value, env: Env) Env {
+    if (bindings == .nil) return env;
     const name = car(bindings);
     const val_expr = cadr(bindings);
     const rest = cdr(cdr(bindings));
@@ -357,32 +360,30 @@ fn evalLetBindings(bindings: Value, env: *const Env) Env {
     if (name != .symbol) @compileError("let binding name must be symbol");
 
     const val = eval(val_expr, env);
-    const new_bindings = &[_]Binding{.{ .name = name.symbol, .val = val }};
-    const extended = &Env{ .bindings = new_bindings, .parent = env };
+    const extended = envExtend(env, &[_]Binding{.{ .name = name.symbol, .val = val }});
     return evalLetBindings(rest, extended);
 }
 
-fn evalArgs(args: Value, env: *const Env) Value {
+fn evalArgs(args: Value, env: Env) Value {
     if (args == .nil) return NIL;
     const val = eval(car(args), env);
     const rest = evalArgs(cdr(args), env);
     return mkCons(val, rest);
 }
 
-fn apply(func: Value, args: Value, env: *const Env) Value {
-    _ = env;
+fn apply(func: Value, args: Value) Value {
     return switch (func) {
-        .builtin => |b| b.func(&args, &Env{ .bindings = &.{}, .parent = null }),
+        .builtin => |b| b.func(&args, Env{ .bindings = &.{} }),
         .lambda => |lam| {
             const new_env = bindParams(lam.params.*, args, lam.env);
-            return eval(lam.body.*, &new_env);
+            return eval(lam.body.*, new_env);
         },
         else => @compileError("not callable: " ++ printValue(func)),
     };
 }
 
-fn bindParams(params: Value, args: Value, env: *const Env) Env {
-    if (params == .nil) return env.*;
+fn bindParams(params: Value, args: Value, env: Env) Env {
+    if (params == .nil) return env;
     if (params != .cons) @compileError("bad param list");
     if (args == .nil) @compileError("not enough arguments");
 
@@ -390,8 +391,7 @@ fn bindParams(params: Value, args: Value, env: *const Env) Env {
     if (name != .symbol) @compileError("param must be symbol");
 
     const val = car(args);
-    const new_bindings = &[_]Binding{.{ .name = name.symbol, .val = val }};
-    const extended = &Env{ .bindings = new_bindings, .parent = env };
+    const extended = envExtend(env, &[_]Binding{.{ .name = name.symbol, .val = val }});
     return bindParams(cdr(params), cdr(args), extended);
 }
 
@@ -440,72 +440,72 @@ fn intToStr(n: i64) []const u8 {
 
 // --- Built-in functions ---
 
-fn builtinAdd(args: *const Value, _: *const Env) Value {
+fn builtinAdd(args: *const Value, _: Env) Value {
     const a = car(args.*).integer;
     const b = cadr(args.*).integer;
     return mkInt(a + b);
 }
 
-fn builtinSub(args: *const Value, _: *const Env) Value {
+fn builtinSub(args: *const Value, _: Env) Value {
     const a = car(args.*).integer;
     const b = cadr(args.*).integer;
     return mkInt(a - b);
 }
 
-fn builtinMul(args: *const Value, _: *const Env) Value {
+fn builtinMul(args: *const Value, _: Env) Value {
     const a = car(args.*).integer;
     const b = cadr(args.*).integer;
     return mkInt(a * b);
 }
 
-fn builtinDiv(args: *const Value, _: *const Env) Value {
+fn builtinDiv(args: *const Value, _: Env) Value {
     const a = car(args.*).integer;
     const b = cadr(args.*).integer;
     if (b == 0) unreachable;
     return mkInt(@divTrunc(a, b));
 }
 
-fn builtinMod(args: *const Value, _: *const Env) Value {
+fn builtinMod(args: *const Value, _: Env) Value {
     const a = car(args.*).integer;
     const b = cadr(args.*).integer;
     return mkInt(@mod(a, b));
 }
 
-fn builtinEq(args: *const Value, _: *const Env) Value {
+fn builtinEq(args: *const Value, _: Env) Value {
     const a = car(args.*);
     const b = cadr(args.*);
     return Value{ .boolean = valueEql(a, b) };
 }
 
-fn builtinLt(args: *const Value, _: *const Env) Value {
+fn builtinLt(args: *const Value, _: Env) Value {
     return Value{ .boolean = car(args.*).integer < cadr(args.*).integer };
 }
 
-fn builtinGt(args: *const Value, _: *const Env) Value {
+fn builtinGt(args: *const Value, _: Env) Value {
     return Value{ .boolean = car(args.*).integer > cadr(args.*).integer };
 }
 
-fn builtinCons(args: *const Value, _: *const Env) Value {
+fn builtinCons(args: *const Value, _: Env) Value {
     return mkCons(car(args.*), cadr(args.*));
 }
 
-fn builtinCar(args: *const Value, _: *const Env) Value {
+fn builtinCar(args: *const Value, _: Env) Value {
     return car(car(args.*));
 }
 
-fn builtinCdr(args: *const Value, _: *const Env) Value {
+fn builtinCdr(args: *const Value, _: Env) Value {
     return cdr(car(args.*));
 }
 
-fn builtinList(args: *const Value, _: *const Env) Value {
+fn builtinList(args: *const Value, _: Env) Value {
     return args.*;
 }
 
-fn builtinIsNil(args: *const Value, _: *const Env) Value {
+fn builtinIsNil(args: *const Value, _: Env) Value {
     return Value{ .boolean = car(args.*) == .nil };
 }
 
-fn builtinNot(args: *const Value, _: *const Env) Value {
+fn builtinNot(args: *const Value, _: Env) Value {
     return Value{ .boolean = !isTruthy(car(args.*)) };
 }
 
@@ -523,7 +523,7 @@ fn valueEql(a: Value, b: Value) bool {
 
 // --- Base environment ---
 
-fn makeBuiltin(name: []const u8, func: *const fn (*const Value, *const Env) Value) Binding {
+fn makeBuiltin(name: []const u8, func: *const fn (*const Value, Env) Value) Binding {
     return .{ .name = name, .val = Value{ .builtin = .{ .name = name, .func = func } } };
 }
 
@@ -544,7 +544,6 @@ pub const base_env = Env{
         makeBuiltin("nil?", &builtinIsNil),
         makeBuiltin("not", &builtinNot),
     },
-    .parent = null,
 };
 
 // --- Top-level API ---
@@ -552,11 +551,12 @@ pub const base_env = Env{
 pub fn run(comptime source: []const u8) []const u8 {
     @setEvalBranchQuota(1000000);
     const expr = read(source);
-    const result = eval(expr, &base_env);
+    const result = eval(expr, base_env);
     return printValue(result);
 }
 
 /// Evaluate multiple top-level expressions, threading an environment.
+/// Supports def and defn for top-level bindings.
 /// Returns the result of the last expression.
 pub fn runProgram(comptime source: []const u8) []const u8 {
     @setEvalBranchQuota(1000000);
@@ -577,9 +577,8 @@ pub fn runProgram(comptime source: []const u8) []const u8 {
             if (head == .symbol and strEql(head.symbol, "def")) {
                 const name = cadr(r.val);
                 const val_expr = caddr(r.val);
-                const val = eval(val_expr, &env);
-                const new_bindings = &[_]Binding{.{ .name = name.symbol, .val = val }};
-                env = .{ .bindings = new_bindings, .parent = &env };
+                const val = eval(val_expr, env);
+                env = envExtend(env, &[_]Binding{.{ .name = name.symbol, .val = val }});
                 last_result = printValue(val);
                 continue;
             }
@@ -591,16 +590,15 @@ pub fn runProgram(comptime source: []const u8) []const u8 {
                 const lam = Value{ .lambda = .{
                     .params = &params,
                     .body = &body,
-                    .env = &env,
+                    .env = env,
                 } };
-                const new_bindings = &[_]Binding{.{ .name = name.symbol, .val = lam }};
-                env = .{ .bindings = new_bindings, .parent = &env };
+                env = envExtend(env, &[_]Binding{.{ .name = name.symbol, .val = lam }});
                 last_result = name.symbol;
                 continue;
             }
         }
 
-        const result = eval(r.val, &env);
+        const result = eval(r.val, env);
         last_result = printValue(result);
     }
 
