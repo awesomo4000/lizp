@@ -24,6 +24,10 @@ const square = lizp.Fn1("(* x x)", "x");
 const abs_ = lizp.Fn1("(if (< x 0) (- 0 x) x)", "x");
 const diff_sq = lizp.Fn2("(* (+ a b) (- a b))", "a", "b");
 
+// Recursive native functions — lisp all the way down, native all the way up
+const factorial = lizp.RecFn1("(if (= n 0) 1 (* n (self (- n 1))))", "self", "n");
+const fib = lizp.RecFn1("(if (< n 2) n (+ (self (- n 1)) (self (- n 2))))", "self", "n");
+
 pub fn main() void {
     const print = std.debug.print;
 
@@ -43,4 +47,8 @@ pub fn main() void {
         sum += square(@intCast(i));
     }
     print("sum_of_squares(0..10) = {d}\n", .{sum});
+
+    print("\n=== recursive native functions ===\n", .{});
+    print("factorial(12) = {d}\n", .{factorial(12)});
+    print("fib(25) = {d}\n", .{fib(25)});
 }

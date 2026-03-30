@@ -282,3 +282,64 @@ test "compiled function in loop" {
     // 0 + 1 + 4 + 9 + 16 = 30
     try testing.expectEqual(@as(i64, 30), sum);
 }
+
+// ============================================================
+// Recursive compiled function tests
+// ============================================================
+
+test "compile recursive factorial" {
+    const factorial = comptime compiler.RecFn1(
+        "(if (= n 0) 1 (* n (self (- n 1))))",
+        "self",
+        "n",
+    );
+    try testing.expectEqual(@as(i64, 1), factorial(0));
+    try testing.expectEqual(@as(i64, 1), factorial(1));
+    try testing.expectEqual(@as(i64, 120), factorial(5));
+    try testing.expectEqual(@as(i64, 3628800), factorial(10));
+}
+
+test "compile recursive fibonacci" {
+    const fib = comptime compiler.RecFn1(
+        "(if (< n 2) n (+ (self (- n 1)) (self (- n 2))))",
+        "self",
+        "n",
+    );
+    try testing.expectEqual(@as(i64, 0), fib(0));
+    try testing.expectEqual(@as(i64, 1), fib(1));
+    try testing.expectEqual(@as(i64, 55), fib(10));
+    try testing.expectEqual(@as(i64, 610), fib(15));
+}
+
+test "compile recursive sum" {
+    const sum_to = comptime compiler.RecFn1(
+        "(if (= n 0) 0 (+ n (self (- n 1))))",
+        "self",
+        "n",
+    );
+    try testing.expectEqual(@as(i64, 0), sum_to(0));
+    try testing.expectEqual(@as(i64, 55), sum_to(10));
+    try testing.expectEqual(@as(i64, 5050), sum_to(100));
+}
+
+test "compile recursive gcd" {
+    const gcd = comptime compiler.RecFn2(
+        "(if (= b 0) a (self b (mod a b)))",
+        "self",
+        "a",
+        "b",
+    );
+    try testing.expectEqual(@as(i64, 6), gcd(12, 18));
+    try testing.expectEqual(@as(i64, 1), gcd(17, 13));
+    try testing.expectEqual(@as(i64, 15), gcd(45, 30));
+}
+
+test "compile recursive with let" {
+    const f = comptime compiler.RecFn1(
+        "(if (= n 0) 0 (let [prev (self (- n 1))] (+ n prev)))",
+        "self",
+        "n",
+    );
+    // same as sum_to
+    try testing.expectEqual(@as(i64, 55), f(10));
+}

@@ -14,3 +14,5 @@ pub const compile = compiler.compile;
 pub const Fn1 = compiler.Fn1;
 pub const Fn2 = compiler.Fn2;
 pub const Fn3 = compiler.Fn3;
+pub const RecFn1 = compiler.RecFn1;
+pub const RecFn2 = compiler.RecFn2;

@@ -45,6 +45,7 @@ The compiler supports a subset for native codegen:
 - Comparisons: `= < > <= >=`
 - Conditionals: `if`
 - Let bindings, `do` blocks
+- Recursive functions via struct wrapper: `RecFn1`, `RecFn2`
 - Type-safe wrappers: `Fn1`, `Fn2`, `Fn3`
 
 ## Build
@@ -74,4 +75,11 @@ const result2 = lizp.runProgram(
 // Compile to native
 const abs_ = lizp.Fn1("(if (< x 0) (- 0 x) x)", "x");
 const diff_sq = lizp.Fn2("(* (+ a b) (- a b))", "a", "b");
+
+// Recursive native functions
+const factorial = lizp.RecFn1(
+    "(if (= n 0) 1 (* n (self (- n 1))))",
+    "self", "n",
+);
+factorial(12) // 479001600 — pure machine code, no interpreter
 ```
