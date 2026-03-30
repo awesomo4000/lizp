@@ -42,6 +42,9 @@ pub fn main() !void {
             return;
         }
         try runFile(args[2], &vm);
+    } else if (std.mem.eql(u8, cmd, "boot")) {
+        const kl_dir = if (args.len >= 3) args[2] else "src/shen/kl";
+        try boot(kl_dir, &vm);
     } else if (std.mem.eql(u8, cmd, "repl")) {
         try repl(&vm);
     } else {
@@ -56,6 +59,7 @@ fn printUsage() void {
         \\Usage:
         \\  shen eval '<expression>'    Evaluate a Kλ expression
         \\  shen run <file.kl>          Load and evaluate a Kλ file
+        \\  shen boot [kl-dir]          Bootstrap Shen from KL files
         \\  shen repl                   Interactive REPL
         \\
     , .{});
@@ -90,6 +94,74 @@ fn runFile(path: []const u8, vm: *Vm) !void {
 
     const content = try file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024);
     try evalString(content, vm);
+}
+
+const boot_order = [_][]const u8{
+    "init.kl",
+    "toplevel.kl",
+    "core.kl",
+    "sys.kl",
+    "dict.kl",
+    "declarations.kl",
+    "writer.kl",
+    "reader.kl",
+    "macros.kl",
+    "prolog.kl",
+    "yacc.kl",
+    "sequent.kl",
+    "t-star.kl",
+    "track.kl",
+    "load.kl",
+    "types.kl",
+    "extension-features.kl",
+    "extension-expand-dynamic.kl",
+    "extension-launcher.kl",
+    "stlib.kl",
+};
+
+fn boot(kl_dir: []const u8, vm: *Vm) !void {
+    var env = Env.init(null);
+    var loaded: usize = 0;
+
+    for (boot_order) |filename| {
+        var path_buf: [512]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ kl_dir, filename }) catch continue;
+
+        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+            std.debug.print("SKIP {s}: {s}\n", .{ filename, @errorName(err) });
+            continue;
+        };
+        defer file.close();
+
+        const content = file.readToEndAlloc(vm.allocator, 10 * 1024 * 1024) catch |err| {
+            std.debug.print("SKIP {s}: {s}\n", .{ filename, @errorName(err) });
+            continue;
+        };
+
+        std.debug.print("Loading {s} ...", .{filename});
+
+        var rd = Reader.init(content, vm);
+        const exprs = rd.readAll() catch |err| {
+            std.debug.print(" READ ERROR: {s}\n", .{@errorName(err)});
+            continue;
+        };
+
+        var ok = true;
+        for (exprs) |expr| {
+            _ = eval_mod.eval(expr, &env, vm) catch |err| {
+                std.debug.print(" EVAL ERROR: {s}\n", .{@errorName(err)});
+                ok = false;
+                break;
+            };
+        }
+
+        if (ok) {
+            loaded += 1;
+            std.debug.print(" ok\n", .{});
+        }
+    }
+
+    std.debug.print("\nLoaded {d}/{d} files.\n", .{ loaded, boot_order.len });
 }
 
 fn repl(vm: *Vm) !void {

@@ -475,6 +475,29 @@ fn appendFn(args: []const Value, p: *anyopaque) anyerror!Value {
     return result;
 }
 
+fn load_(args: []const Value, p: *anyopaque) anyerror!Value {
+    const path = arg(args, 0);
+    if (path != .string) return error.TypeError;
+    const m = vm(p);
+    const file = std.fs.cwd().openFile(path.string, .{}) catch return error.TypeError;
+    defer file.close();
+    const content = try file.readToEndAlloc(m.allocator, 10 * 1024 * 1024);
+    var rd = @import("reader.zig").Reader.init(content, m);
+    var env = Env.init(null);
+    var result: Value = .nil;
+    while (true) {
+        const exprs = rd.readAll() catch break;
+        for (exprs) |expr| {
+            result = eval_mod.eval(expr, &env, m) catch |err| {
+                std.debug.print("load error in {s}: {s}\n", .{ path.string, @errorName(err) });
+                return err;
+            };
+        }
+        break;
+    }
+    return result;
+}
+
 fn shenFillvector(args: []const Value, _: *anyopaque) anyerror!Value {
     const vec = arg(args, 0);
     const start = arg(args, 1);
@@ -563,6 +586,7 @@ const primitives_table = [_]PrimDef{
     .{ .name = "reverse", .func = native(reverseFn) },
     .{ .name = "append", .func = native(appendFn) },
     .{ .name = "shen.fillvector", .func = native(shenFillvector) },
+    .{ .name = "load", .func = native(load_) },
 };
 
 pub fn registerPrimitives(m: *Vm) !void {
