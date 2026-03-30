@@ -201,9 +201,15 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
 
 fn evalSrc(src: []const u8, env: *Env, vm: *Vm) void {
     var rd = Reader.init(src, vm);
-    const exprs = rd.readAll() catch return;
+    const exprs = rd.readAll() catch |err| {
+        std.debug.print("boot-init read error: {s}\n", .{@errorName(err)});
+        return;
+    };
     for (exprs) |expr| {
-        _ = eval_mod.eval(expr, env, vm) catch {};
+        _ = eval_mod.eval(expr, env, vm) catch |err| {
+            const msg = if (err == error.ShenError) vm.last_error else @errorName(err);
+            std.debug.print("boot-init eval error: {s}\n", .{msg});
+        };
     }
 }
 

@@ -203,6 +203,25 @@ pub const Vm = struct {
     sym_true: u32,
     sym_false: u32,
 
+    // Pre-interned symbols for hot primitives (inlined in eval)
+    sym_cons: u32,
+    sym_hd: u32,
+    sym_tl: u32,
+    sym_consp: u32,
+    sym_eq: u32,
+    sym_add: u32,
+    sym_sub: u32,
+    sym_mul: u32,
+    sym_gt: u32,
+    sym_lt: u32,
+    sym_numberp: u32,
+    sym_stringp: u32,
+    sym_symbolp: u32,
+    sym_not: u32,
+    sym_value: u32,
+    sym_set: u32,
+    sym_do: u32,
+
     gensym_counter: u64 = 0,
     last_error: []const u8 = "error",
 
@@ -219,6 +238,23 @@ pub const Vm = struct {
         const s_trap_error = try pool.intern("trap-error");
         const s_true = try pool.intern("true");
         const s_false = try pool.intern("false");
+        const s_cons = try pool.intern("cons");
+        const s_hd = try pool.intern("hd");
+        const s_tl = try pool.intern("tl");
+        const s_consp = try pool.intern("cons?");
+        const s_eq = try pool.intern("=");
+        const s_add = try pool.intern("+");
+        const s_sub = try pool.intern("-");
+        const s_mul = try pool.intern("*");
+        const s_gt = try pool.intern(">");
+        const s_lt = try pool.intern("<");
+        const s_numberp = try pool.intern("number?");
+        const s_stringp = try pool.intern("string?");
+        const s_symbolp = try pool.intern("symbol?");
+        const s_not = try pool.intern("not");
+        const s_value = try pool.intern("value");
+        const s_set = try pool.intern("set");
+        const s_do = try pool.intern("do");
         return .{
             .allocator = allocator,
             .pool = pool,
@@ -235,6 +271,23 @@ pub const Vm = struct {
             .sym_trap_error = s_trap_error,
             .sym_true = s_true,
             .sym_false = s_false,
+            .sym_cons = s_cons,
+            .sym_hd = s_hd,
+            .sym_tl = s_tl,
+            .sym_consp = s_consp,
+            .sym_eq = s_eq,
+            .sym_add = s_add,
+            .sym_sub = s_sub,
+            .sym_mul = s_mul,
+            .sym_gt = s_gt,
+            .sym_lt = s_lt,
+            .sym_numberp = s_numberp,
+            .sym_stringp = s_stringp,
+            .sym_symbolp = s_symbolp,
+            .sym_not = s_not,
+            .sym_value = s_value,
+            .sym_set = s_set,
+            .sym_do = s_do,
         };
     }
 

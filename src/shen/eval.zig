@@ -137,6 +137,106 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                         return func;
                     }
 
+                    // Inlined primitives — avoid function lookup + evalList + dispatch
+                    if (sym == vm.sym_cons) {
+                        const a = try eval(listNth(tail, 0), current_env, vm);
+                        const b = try eval(listNth(tail, 1), current_env, vm);
+                        return vm.makeCons(a, b);
+                    }
+                    if (sym == vm.sym_hd) {
+                        const v = try eval(listNth(tail, 0), current_env, vm);
+                        if (v == .cons) return v.cons.car;
+                        return error.TypeError;
+                    }
+                    if (sym == vm.sym_tl) {
+                        const v = try eval(listNth(tail, 0), current_env, vm);
+                        if (v == .cons) return v.cons.cdr;
+                        return error.TypeError;
+                    }
+                    if (sym == vm.sym_consp) {
+                        const v = try eval(listNth(tail, 0), current_env, vm);
+                        return Value{ .boolean = v == .cons };
+                    }
+                    if (sym == vm.sym_eq) {
+                        const a = try eval(listNth(tail, 0), current_env, vm);
+                        const b = try eval(listNth(tail, 1), current_env, vm);
+                        return Value{ .boolean = a.eql(b) };
+                    }
+                    if (sym == vm.sym_add) {
+                        const a = try eval(listNth(tail, 0), current_env, vm);
+                        const b = try eval(listNth(tail, 1), current_env, vm);
+                        if (a == .integer and b == .integer)
+                            return Value{ .integer = a.integer + b.integer };
+                        if (a.isNumber() and b.isNumber())
+                            return Value{ .float = a.toFloat() + b.toFloat() };
+                        return error.TypeError;
+                    }
+                    if (sym == vm.sym_sub) {
+                        const a = try eval(listNth(tail, 0), current_env, vm);
+                        const b = try eval(listNth(tail, 1), current_env, vm);
+                        if (a == .integer and b == .integer)
+                            return Value{ .integer = a.integer - b.integer };
+                        if (a.isNumber() and b.isNumber())
+                            return Value{ .float = a.toFloat() - b.toFloat() };
+                        return error.TypeError;
+                    }
+                    if (sym == vm.sym_mul) {
+                        const a = try eval(listNth(tail, 0), current_env, vm);
+                        const b = try eval(listNth(tail, 1), current_env, vm);
+                        if (a == .integer and b == .integer)
+                            return Value{ .integer = a.integer * b.integer };
+                        if (a.isNumber() and b.isNumber())
+                            return Value{ .float = a.toFloat() * b.toFloat() };
+                        return error.TypeError;
+                    }
+                    if (sym == vm.sym_gt) {
+                        const a = try eval(listNth(tail, 0), current_env, vm);
+                        const b = try eval(listNth(tail, 1), current_env, vm);
+                        if (a.isNumber() and b.isNumber())
+                            return Value{ .boolean = a.toFloat() > b.toFloat() };
+                        return error.TypeError;
+                    }
+                    if (sym == vm.sym_lt) {
+                        const a = try eval(listNth(tail, 0), current_env, vm);
+                        const b = try eval(listNth(tail, 1), current_env, vm);
+                        if (a.isNumber() and b.isNumber())
+                            return Value{ .boolean = a.toFloat() < b.toFloat() };
+                        return error.TypeError;
+                    }
+                    if (sym == vm.sym_numberp) {
+                        const v = try eval(listNth(tail, 0), current_env, vm);
+                        return Value{ .boolean = v.isNumber() };
+                    }
+                    if (sym == vm.sym_stringp) {
+                        const v = try eval(listNth(tail, 0), current_env, vm);
+                        return Value{ .boolean = v == .string };
+                    }
+                    if (sym == vm.sym_symbolp) {
+                        const v = try eval(listNth(tail, 0), current_env, vm);
+                        return Value{ .boolean = v == .symbol };
+                    }
+                    if (sym == vm.sym_not) {
+                        const v = try eval(listNth(tail, 0), current_env, vm);
+                        return Value{ .boolean = !v.isTruthy() };
+                    }
+                    if (sym == vm.sym_value) {
+                        const v = try eval(listNth(tail, 0), current_env, vm);
+                        if (v != .symbol) return error.TypeError;
+                        return vm.globals.get(v.symbol) orelse error.UnboundSymbol;
+                    }
+                    if (sym == vm.sym_set) {
+                        const s = try eval(listNth(tail, 0), current_env, vm);
+                        const v = try eval(listNth(tail, 1), current_env, vm);
+                        if (s != .symbol) return error.TypeError;
+                        try vm.globals.put(vm.allocator, s.symbol, v);
+                        return v;
+                    }
+                    if (sym == vm.sym_do) {
+                        _ = try eval(listNth(tail, 0), current_env, vm);
+                        current = listNth(tail, 1);
+                        continue; // TCO for second arg
+                    }
+
                     if (sym == vm.sym_trap_error) {
                         const body = listNth(tail, 0);
                         const handler = listNth(tail, 1);
