@@ -40,4 +40,23 @@ pub fn build(b: *std.Build) void {
     const run_lib_tests = b.addRunArtifact(lib_tests);
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_lib_tests.step);
+
+    // Shen Kλ kernel executable
+    const shen_mod = b.createModule(.{
+        .root_source_file = b.path("src/shen/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const shen = b.addExecutable(.{
+        .name = "shen",
+        .root_module = shen_mod,
+    });
+    b.installArtifact(shen);
+
+    const shen_run_cmd = b.addRunArtifact(shen);
+    shen_run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |a| shen_run_cmd.addArgs(a);
+    const shen_run_step = b.step("shen", "Run the Shen Kλ kernel");
+    shen_run_step.dependOn(&shen_run_cmd.step);
 }

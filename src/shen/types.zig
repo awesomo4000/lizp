@@ -1,0 +1,304 @@
+const std = @import("std");
+
+// ============================================================
+// Shen Kλ Kernel — Value Types
+//
+// Tagged union for all Kλ values. Arena-allocated, no GC.
+// Numbers are dual i64/f64 with promotion on mixed ops.
+// Symbols are interned for O(1) comparison.
+// ============================================================
+
+pub const Value = union(enum) {
+    nil, // empty list
+    boolean: bool,
+    integer: i64,
+    float: f64,
+    symbol: u32, // index into InternPool
+    string: []const u8,
+    cons: *Cell,
+    vector: *Vector,
+    closure: *Closure,
+    native_fn: *const anyopaque, // actually *const NativeFn, cast at call site
+    stream: *Stream,
+    err: *ShenError,
+
+    pub fn isTruthy(self: Value) bool {
+        return switch (self) {
+            .nil => false,
+            .boolean => |b| b,
+            else => true,
+        };
+    }
+
+    pub fn isNumber(self: Value) bool {
+        return self == .integer or self == .float;
+    }
+
+    pub fn toFloat(self: Value) f64 {
+        return switch (self) {
+            .integer => |n| @floatFromInt(n),
+            .float => |f| f,
+            else => unreachable,
+        };
+    }
+
+    pub fn eql(a: Value, b: Value) bool {
+        const tag_a = std.meta.activeTag(a);
+        const tag_b = std.meta.activeTag(b);
+
+        // Cross-type number equality: 1 == 1.0
+        if (a.isNumber() and b.isNumber()) {
+            return a.toFloat() == b.toFloat();
+        }
+
+        if (tag_a != tag_b) return false;
+
+        return switch (a) {
+            .nil => true,
+            .boolean => |v| v == b.boolean,
+            .integer => |v| v == b.integer,
+            .float => |v| v == b.float,
+            .symbol => |v| v == b.symbol,
+            .string => |v| std.mem.eql(u8, v, b.string),
+            .cons => |c| c.car.eql(b.cons.car) and c.cdr.eql(b.cons.cdr),
+            .vector => |v| v == b.vector, // identity
+            .closure => |v| v == b.closure, // identity
+            .native_fn => |v| v == b.native_fn, // identity
+            .stream => |v| v == b.stream, // identity
+            .err => |v| v == b.err, // identity
+        };
+    }
+};
+
+pub const Cell = struct {
+    car: Value,
+    cdr: Value,
+};
+
+pub const Vector = struct {
+    data: []Value, // mutable, fixed-size
+};
+
+pub const Closure = struct {
+    params: []const u32, // interned param symbols
+    body: Value, // s-expression
+    env: *Env, // captured lexical scope
+    name: ?u32, // for defun'd functions (for TCO)
+    arity: u16, // total params expected
+    applied: []const Value, // partial application args so far
+};
+
+// NativeFn signature. Stored as *const anyopaque in Value to break
+// the Value -> NativeFn -> Value dependency cycle.
+pub const NativeFnSig = *const fn (args: []const Value, vm_ptr: *anyopaque) anyerror!Value;
+
+pub fn callNative(func_ptr: *const anyopaque, args: []const Value, vm_ptr: *anyopaque) anyerror!Value {
+    const f: NativeFnSig = @ptrCast(func_ptr);
+    return f(args, vm_ptr);
+}
+
+pub const Stream = struct {
+    file: std.fs.File,
+    mode: enum { in, out },
+};
+
+pub const ShenError = struct {
+    message: []const u8,
+};
+
+// --- Environment ---
+
+pub const Binding = struct {
+    sym: u32,
+    val: Value,
+};
+
+pub const Env = struct {
+    bindings: std.ArrayListUnmanaged(Binding),
+    parent: ?*Env,
+
+    pub fn init(parent: ?*Env) Env {
+        return .{
+            .bindings = .{},
+            .parent = parent,
+        };
+    }
+
+    pub fn lookup(self: *const Env, sym: u32) ?Value {
+        var i = self.bindings.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.bindings.items[i].sym == sym) {
+                return self.bindings.items[i].val;
+            }
+        }
+        if (self.parent) |p| return p.lookup(sym);
+        return null;
+    }
+
+    pub fn bind(self: *Env, allocator: std.mem.Allocator, sym: u32, val: Value) !void {
+        try self.bindings.append(allocator, .{ .sym = sym, .val = val });
+    }
+};
+
+// --- Symbol Interning ---
+
+pub const InternPool = struct {
+    strings: std.ArrayListUnmanaged([]const u8),
+    lookup_map: std.StringHashMapUnmanaged(u32),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) InternPool {
+        return .{
+            .strings = .{},
+            .lookup_map = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn intern(self: *InternPool, name: []const u8) !u32 {
+        if (self.lookup_map.get(name)) |idx| return idx;
+
+        const owned = try self.allocator.dupe(u8, name);
+        const idx: u32 = @intCast(self.strings.items.len);
+        try self.strings.append(self.allocator, owned);
+        try self.lookup_map.put(self.allocator, owned, idx);
+        return idx;
+    }
+
+    pub fn getName(self: *const InternPool, idx: u32) []const u8 {
+        return self.strings.items[idx];
+    }
+
+    pub fn deinit(self: *InternPool) void {
+        for (self.strings.items) |s| self.allocator.free(s);
+        self.strings.deinit(self.allocator);
+        self.lookup_map.deinit(self.allocator);
+    }
+};
+
+// --- VM State ---
+// Central state passed to all primitives and the eval loop.
+
+pub const Vm = struct {
+    allocator: std.mem.Allocator,
+    pool: InternPool,
+
+    // Global symbol table (set/value)
+    globals: std.AutoHashMapUnmanaged(u32, Value),
+
+    // Global function table (defun)
+    functions: std.AutoHashMapUnmanaged(u32, Value),
+
+    // Pre-interned symbols for special forms
+    sym_defun: u32,
+    sym_lambda: u32,
+    sym_let: u32,
+    sym_freeze: u32,
+    sym_if: u32,
+    sym_and: u32,
+    sym_or: u32,
+    sym_cond: u32,
+    sym_trap_error: u32,
+    sym_true: u32,
+    sym_false: u32,
+
+    pub fn init(allocator: std.mem.Allocator) !Vm {
+        var pool = InternPool.init(allocator);
+        const s_defun = try pool.intern("defun");
+        const s_lambda = try pool.intern("lambda");
+        const s_let = try pool.intern("let");
+        const s_freeze = try pool.intern("freeze");
+        const s_if = try pool.intern("if");
+        const s_and = try pool.intern("and");
+        const s_or = try pool.intern("or");
+        const s_cond = try pool.intern("cond");
+        const s_trap_error = try pool.intern("trap-error");
+        const s_true = try pool.intern("true");
+        const s_false = try pool.intern("false");
+        return .{
+            .allocator = allocator,
+            .pool = pool,
+            .globals = .{},
+            .functions = .{},
+            .sym_defun = s_defun,
+            .sym_lambda = s_lambda,
+            .sym_let = s_let,
+            .sym_freeze = s_freeze,
+            .sym_if = s_if,
+            .sym_and = s_and,
+            .sym_or = s_or,
+            .sym_cond = s_cond,
+            .sym_trap_error = s_trap_error,
+            .sym_true = s_true,
+            .sym_false = s_false,
+        };
+    }
+
+    pub fn makeCons(self: *Vm, car: Value, cdr: Value) !Value {
+        const cell = try self.allocator.create(Cell);
+        cell.* = .{ .car = car, .cdr = cdr };
+        return Value{ .cons = cell };
+    }
+
+    pub fn makeString(self: *Vm, s: []const u8) !Value {
+        const owned = try self.allocator.dupe(u8, s);
+        return Value{ .string = owned };
+    }
+
+    pub fn asOpaque(self: *Vm) *anyopaque {
+        return @ptrCast(self);
+    }
+
+    pub fn fromOpaque(ptr: *anyopaque) *Vm {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    pub fn makeClosure(self: *Vm, params: []const u32, body: Value, env: *Env, name: ?u32) !Value {
+        const cls = try self.allocator.create(Closure);
+        cls.* = .{
+            .params = params,
+            .body = body,
+            .env = env,
+            .name = name,
+            .arity = @intCast(params.len),
+            .applied = &.{},
+        };
+        return Value{ .closure = cls };
+    }
+
+    pub fn makePartial(self: *Vm, base: *Closure, args: []const Value) !Value {
+        const new_applied = try self.allocator.alloc(Value, base.applied.len + args.len);
+        @memcpy(new_applied[0..base.applied.len], base.applied);
+        @memcpy(new_applied[base.applied.len..], args);
+
+        const cls = try self.allocator.create(Closure);
+        cls.* = .{
+            .params = base.params,
+            .body = base.body,
+            .env = base.env,
+            .name = base.name,
+            .arity = base.arity,
+            .applied = new_applied,
+        };
+        return Value{ .closure = cls };
+    }
+
+    pub fn makeError(self: *Vm, msg: []const u8) !Value {
+        const e = try self.allocator.create(ShenError);
+        const owned = try self.allocator.dupe(u8, msg);
+        e.* = .{ .message = owned };
+        return Value{ .err = e };
+    }
+
+    pub fn internSym(self: *Vm, name: []const u8) !Value {
+        const idx = try self.pool.intern(name);
+        return Value{ .symbol = idx };
+    }
+
+    pub fn deinit(self: *Vm) void {
+        self.pool.deinit();
+        self.globals.deinit(self.allocator);
+        self.functions.deinit(self.allocator);
+    }
+};
