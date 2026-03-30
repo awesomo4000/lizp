@@ -9,10 +9,6 @@ const Vm = types.Vm;
 const Env = types.Env;
 const Reader = reader_mod.Reader;
 
-fn stdout() std.fs.File {
-    return std.fs.File.stdout();
-}
-
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -47,8 +43,6 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, cmd, "boot")) {
         const kl_dir = if (args.len >= 3) args[2] else "src/shen/kl";
         try boot(kl_dir, &vm);
-    } else if (std.mem.eql(u8, cmd, "repl")) {
-        try repl(&vm);
     } else {
         printUsage();
     }
@@ -62,13 +56,13 @@ fn printUsage() void {
         \\  shen eval '<expression>'    Evaluate a Kλ expression
         \\  shen run <file.kl>          Load and evaluate a Kλ file
         \\  shen boot [kl-dir]          Bootstrap Shen from KL files
-        \\  shen repl                   Interactive REPL
         \\
     , .{});
 }
 
 fn evalString(input: []const u8, vm: *Vm) !void {
-    var env = Env.init(null);
+    const env = try vm.allocator.create(Env);
+    env.* = Env.init(null);
     var rd = Reader.init(input, vm);
     const exprs = rd.readAll() catch |err| {
         std.debug.print("read error: {s}\n", .{@errorName(err)});
@@ -77,7 +71,7 @@ fn evalString(input: []const u8, vm: *Vm) !void {
 
     var result: Value = .nil;
     for (exprs) |expr| {
-        result = eval_mod.eval(expr, &env, vm) catch |err| {
+        result = eval_mod.eval(expr, env, vm) catch |err| {
             std.debug.print("eval error: {s}\n", .{@errorName(err)});
             return;
         };
@@ -122,7 +116,8 @@ const boot_order = [_][]const u8{
 };
 
 fn boot(kl_dir: []const u8, vm: *Vm) !void {
-    var env = Env.init(null);
+    const env = try vm.allocator.create(Env);
+    env.* = Env.init(null);
     var loaded: usize = 0;
 
     for (boot_order) |filename| {
@@ -150,7 +145,7 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
 
         var ok = true;
         for (exprs) |expr| {
-            _ = eval_mod.eval(expr, &env, vm) catch |err| {
+            _ = eval_mod.eval(expr, env, vm) catch |err| {
                 std.debug.print(" EVAL ERROR: {s}\n", .{@errorName(err)});
                 ok = false;
                 break;
@@ -165,21 +160,10 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
 
     std.debug.print("\nLoaded {d}/{d} files.\n", .{ loaded, boot_order.len });
 
-    // Initialize environment (globals, arity table, property vector, etc.)
+    // Initialize environment
     std.debug.print("Initializing...", .{});
 
-    const boot_phases = [_][]const u8{
-        // Phase 1: core environment setup
-        "(shen.initialise-environment)",
-        "(trap-error (shen.initialise-signedfuncs) (lambda E ()))",
-        "(trap-error (stlib.initialise-environment) (lambda E ()))",
-        "(trap-error (shen.x.features.initialise ()) (lambda E ()))",
-    };
-    for (boot_phases) |src| {
-        evalSrc(src, &env, vm);
-    }
-
-    // Phase 2: populate shen.*system* from all defined functions
+    // Populate shen.*system* from all defined functions (before init reads it)
     {
         var sys_list: Value = .nil;
         var it = vm.functions.iterator();
@@ -190,34 +174,25 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
         vm.globals.put(vm.allocator, sys_sym, sys_list) catch {};
     }
 
-    // Phase 3: build lambda forms for all known functions
-    evalSrc(
-        \\(shen.for-each
-        \\  (lambda X
-        \\    (trap-error (shen.set-lambda-form-entry (shen.lambda-entry X))
-        \\                (lambda E ())))
-        \\  (value shen.*system*))
-    , &env, vm);
-
-    // Patch fn to auto-build lambda forms on miss
-    evalSrc(
-        \\(defun fn (X)
-        \\  (cond ((= (arity X) 0) (X))
-        \\        (true (trap-error
-        \\                (get X shen.lambda-form (value *property-vector*))
-        \\                (lambda E
-        \\                  (let Entry (shen.lambda-entry X)
-        \\                    (if (cons? Entry)
-        \\                        (do (shen.set-lambda-form-entry Entry) (tl Entry))
-        \\                        (simple-error (cn "fn: " (shen.app X " is undefined\n" shen.a))))))))))
-    , &env, vm);
+    // Run boot-init.kl (environment setup, lambda forms, fn patch)
+    {
+        var init_path_buf: [512]u8 = undefined;
+        const init_path = std.fmt.bufPrint(&init_path_buf, "{s}/boot-init.kl", .{kl_dir}) catch "src/shen/kl/boot-init.kl";
+        const init_file = std.fs.cwd().openFile(init_path, .{}) catch |err| {
+            std.debug.print(" SKIP boot-init.kl: {s}\n", .{@errorName(err)});
+            return;
+        };
+        defer init_file.close();
+        const init_content = init_file.readToEndAlloc(vm.allocator, 1 * 1024 * 1024) catch return;
+        evalSrc(init_content, env, vm);
+    }
 
     std.debug.print(" done.\n", .{});
 
     std.debug.print("Shen ready.\n\n", .{});
 
     // Drop into REPL
-    repl_with_env(vm, &env);
+    repl_with_env(vm, env);
 }
 
 fn evalSrc(src: []const u8, env: *Env, vm: *Vm) void {
@@ -282,47 +257,3 @@ fn repl_with_env(vm: *Vm, env: *Env) void {
     }
 }
 
-fn repl(vm: *Vm) !void {
-    var env = Env.init(null);
-    const stdin = std.fs.File.stdin();
-
-    std.debug.print("shen-zig 0.1\n", .{});
-
-    while (true) {
-        std.debug.print(">> ", .{});
-
-        // Read a line manually
-        var buf: [4096]u8 = undefined;
-        var len: usize = 0;
-        while (len < buf.len) {
-            const n = stdin.read(buf[len .. len + 1]) catch break;
-            if (n == 0) return; // EOF
-            if (buf[len] == '\n') break;
-            len += 1;
-        }
-        const line = buf[0..len];
-
-        if (line.len == 0) continue;
-        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t"), "quit")) break;
-
-        var rd = Reader.init(line, vm);
-        const exprs = rd.readAll() catch |err| {
-            std.debug.print("read error: {s}\n", .{@errorName(err)});
-            continue;
-        };
-
-        var result: Value = .nil;
-        for (exprs) |expr| {
-            result = eval_mod.eval(expr, &env, vm) catch |err| {
-                std.debug.print("error: {s}\n", .{@errorName(err)});
-                continue;
-            };
-        }
-
-        const s = printer_mod.valueToString(vm, result) catch |err| {
-            std.debug.print("print error: {s}\n", .{@errorName(err)});
-            continue;
-        };
-        std.debug.print("{s}\n", .{s});
-    }
-}

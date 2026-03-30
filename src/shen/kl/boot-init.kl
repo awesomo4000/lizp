@@ -1,0 +1,24 @@
+\* Boot initialization — run after loading all KL files *\
+
+(shen.initialise-environment)
+(trap-error (shen.initialise-signedfuncs) (lambda E ()))
+(trap-error (stlib.initialise-environment) (lambda E ()))
+(trap-error (shen.x.features.initialise ()) (lambda E ()))
+
+\* Build lambda forms for all functions with known arities *\
+(shen.for-each
+  (lambda X
+    (trap-error (shen.set-lambda-form-entry (shen.lambda-entry X))
+                (lambda E ())))
+  (value shen.*system*))
+
+\* Patch fn to auto-build lambda forms on miss *\
+(defun fn (X)
+  (cond ((= (arity X) 0) (X))
+        (true (trap-error
+                (get X shen.lambda-form (value *property-vector*))
+                (lambda E
+                  (let Entry (shen.lambda-entry X)
+                    (if (cons? Entry)
+                        (do (shen.set-lambda-form-entry Entry) (tl Entry))
+                        (simple-error (cn "fn: " (shen.app X " is undefined\n" shen.a))))))))))

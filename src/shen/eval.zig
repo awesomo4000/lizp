@@ -170,40 +170,16 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                     }
 
                     if (total_args == cls.arity) {
-                        // Full application — set up env and TCO
-                        const new_env = try makeEnv(vm, cls.env);
-                        var arg_idx: usize = 0;
-                        for (cls.params) |param| {
-                            const val = if (arg_idx < cls.applied.len)
-                                cls.applied[arg_idx]
-                            else
-                                args[arg_idx - cls.applied.len];
-                            try new_env.bind(vm.allocator, param, val);
-                            arg_idx += 1;
-                        }
+                        current_env = try bindClosureArgs(cls, args, vm);
                         current = cls.body;
-                        current_env = new_env;
                         continue; // TCO
                     }
 
                     // Over-application: apply fully, then apply remaining args
                     const needed = cls.arity - cls.applied.len;
-                    const first_args = args[0..needed];
-                    const rest_args = args[needed..];
-
-                    const new_env = try makeEnv(vm, cls.env);
-                    var arg_idx: usize = 0;
-                    for (cls.params) |param| {
-                        const val = if (arg_idx < cls.applied.len)
-                            cls.applied[arg_idx]
-                        else
-                            first_args[arg_idx - cls.applied.len];
-                        try new_env.bind(vm.allocator, param, val);
-                        arg_idx += 1;
-                    }
-
+                    const new_env = try bindClosureArgs(cls, args[0..needed], vm);
                     const intermediate = try eval(cls.body, new_env, vm);
-                    return apply(intermediate, rest_args, vm);
+                    return apply(intermediate, args[needed..], vm);
                 }
 
                 if (func == .native_fn) {
@@ -215,20 +191,9 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                     if (vm.functions.get(func.symbol)) |f| {
                         if (f == .closure) {
                             const cls = f.closure;
-                            const total_args = cls.applied.len + args.len;
-                            if (total_args == cls.arity) {
-                                const new_env = try makeEnv(vm, cls.env);
-                                var arg_idx: usize = 0;
-                                for (cls.params) |param| {
-                                    const val = if (arg_idx < cls.applied.len)
-                                        cls.applied[arg_idx]
-                                    else
-                                        args[arg_idx - cls.applied.len];
-                                    try new_env.bind(vm.allocator, param, val);
-                                    arg_idx += 1;
-                                }
+                            if (cls.applied.len + args.len == cls.arity) {
+                                current_env = try bindClosureArgs(cls, args, vm);
                                 current = cls.body;
-                                current_env = new_env;
                                 continue :tco;
                             }
                         }
@@ -242,23 +207,6 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
     }
 }
 
-/// Evaluate cond — needs its own function since we can't `continue`
-/// the outer TCO loop from inside a while loop on clauses.
-fn evalCond(clauses: Value, env: *Env, vm: *Vm) anyerror!Value {
-    var cur = clauses;
-    while (cur == .cons) {
-        const clause = cur.cons.car;
-        const test_expr = listNth(clause, 0);
-        const body_expr = listNth(clause, 1);
-        const test_val = try eval(test_expr, env, vm);
-        if (test_val.isTruthy()) {
-            return eval(body_expr, env, vm);
-        }
-        cur = cur.cons.cdr;
-    }
-    return error.BadSpecialForm; // no cond clause matched
-}
-
 /// Apply a function to arguments
 pub fn apply(func: Value, args: []const Value, vm: *Vm) anyerror!Value {
     switch (func) {
@@ -269,34 +217,14 @@ pub fn apply(func: Value, args: []const Value, vm: *Vm) anyerror!Value {
                 return vm.makePartial(cls, args);
             }
             if (total == cls.arity) {
-                const new_env = try makeEnv(vm, cls.env);
-                var arg_idx: usize = 0;
-                for (cls.params) |param| {
-                    const val = if (arg_idx < cls.applied.len)
-                        cls.applied[arg_idx]
-                    else
-                        args[arg_idx - cls.applied.len];
-                    try new_env.bind(vm.allocator, param, val);
-                    arg_idx += 1;
-                }
+                const new_env = try bindClosureArgs(cls, args, vm);
                 return eval(cls.body, new_env, vm);
             }
             // Over-apply
             const needed = cls.arity - cls.applied.len;
-            const first = args[0..needed];
-            const rest = args[needed..];
-            const new_env = try makeEnv(vm, cls.env);
-            var arg_idx: usize = 0;
-            for (cls.params) |param| {
-                const val = if (arg_idx < cls.applied.len)
-                    cls.applied[arg_idx]
-                else
-                    first[arg_idx - cls.applied.len];
-                try new_env.bind(vm.allocator, param, val);
-                arg_idx += 1;
-            }
+            const new_env = try bindClosureArgs(cls, args[0..needed], vm);
             const intermediate = try eval(cls.body, new_env, vm);
-            return apply(intermediate, rest, vm);
+            return apply(intermediate, args[needed..], vm);
         },
         else => return error.NotAFunction,
     }
@@ -341,4 +269,19 @@ fn makeEnv(vm: *Vm, parent: *Env) !*Env {
     const e = try vm.allocator.create(Env);
     e.* = Env.init(parent);
     return e;
+}
+
+/// Bind closure params to applied + new args, return the new env.
+fn bindClosureArgs(cls: *const Closure, args: []const Value, vm: *Vm) !*Env {
+    const new_env = try makeEnv(vm, cls.env);
+    var i: usize = 0;
+    for (cls.params) |param| {
+        const val = if (i < cls.applied.len)
+            cls.applied[i]
+        else
+            args[i - cls.applied.len];
+        try new_env.bind(vm.allocator, param, val);
+        i += 1;
+    }
+    return new_env;
 }
