@@ -14,7 +14,9 @@ fn stdout() std.fs.File {
 }
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     var vm = try Vm.init(allocator);
     defer vm.deinit();
 
@@ -162,6 +164,51 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
     }
 
     std.debug.print("\nLoaded {d}/{d} files.\n", .{ loaded, boot_order.len });
+
+    std.debug.print("Shen ready.\n\n", .{});
+
+    // Drop into REPL
+    repl_with_env(vm, &env);
+}
+
+fn repl_with_env(vm: *Vm, env: *Env) void {
+    const stdin = std.fs.File.stdin();
+
+    while (true) {
+        std.debug.print("shen>> ", .{});
+
+        var buf: [4096]u8 = undefined;
+        var len: usize = 0;
+        while (len < buf.len) {
+            const n = stdin.read(buf[len .. len + 1]) catch break;
+            if (n == 0) return;
+            if (buf[len] == '\n') break;
+            len += 1;
+        }
+        const line = buf[0..len];
+        if (line.len == 0) continue;
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t"), "quit")) break;
+
+        var rd = Reader.init(line, vm);
+        const exprs = rd.readAll() catch |err| {
+            std.debug.print("read error: {s}\n", .{@errorName(err)});
+            continue;
+        };
+
+        var result: Value = .nil;
+        for (exprs) |expr| {
+            result = eval_mod.eval(expr, env, vm) catch |err| {
+                std.debug.print("error: {s}\n", .{@errorName(err)});
+                continue;
+            };
+        }
+
+        const s = printer_mod.valueToString(vm, result) catch |err| {
+            std.debug.print("print error: {s}\n", .{@errorName(err)});
+            continue;
+        };
+        std.debug.print("{s}\n", .{s});
+    }
 }
 
 fn repl(vm: *Vm) !void {
