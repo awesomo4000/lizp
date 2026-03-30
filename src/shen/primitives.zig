@@ -390,12 +390,23 @@ fn nl(args: []const Value, _: *anyopaque) anyerror!Value {
     return Value{ .integer = 0 };
 }
 
-fn stoutput_(_: []const Value, _: *anyopaque) anyerror!Value {
-    return .nil; // stub — stream placeholder
+fn stoutput_(_: []const Value, p: *anyopaque) anyerror!Value {
+    const m = vm(p);
+    const s = try m.allocator.create(types.Stream);
+    s.* = .{ .file = std.fs.File.stdout(), .mode = .out };
+    return Value{ .stream = s };
 }
 
-fn stinput_(_: []const Value, _: *anyopaque) anyerror!Value {
-    return .nil; // stub — stream placeholder
+fn charStoutput(args: []const Value, _: *anyopaque) anyerror!Value {
+    const s = arg(args, 0);
+    return Value{ .boolean = s == .stream };
+}
+
+fn stinput_(_: []const Value, p: *anyopaque) anyerror!Value {
+    const m = vm(p);
+    const s = try m.allocator.create(types.Stream);
+    s.* = .{ .file = std.fs.File.stdin(), .mode = .in };
+    return Value{ .stream = s };
 }
 
 fn hdstr_(args: []const Value, p: *anyopaque) anyerror!Value {
@@ -582,6 +593,7 @@ const primitives_table = [_]PrimDef{
     .{ .name = "nl", .func = native(nl) },
     .{ .name = "stoutput", .func = native(stoutput_) },
     .{ .name = "stinput", .func = native(stinput_) },
+    .{ .name = "shen.char-stoutput?", .func = native(charStoutput) },
     .{ .name = "hdstr", .func = native(hdstr_) },
     .{ .name = "shen.app", .func = native(shenApp) },
     // thaw is defined in KL as (defun thaw (X) (X)) — uses eval TCO loop

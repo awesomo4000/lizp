@@ -40,6 +40,8 @@ pub const Reader = struct {
         return switch (self.input[self.pos]) {
             '(' => self.readList(),
             ')' => error.UnexpectedClose,
+            '[' => self.readSquareList(),
+            ']' => error.UnexpectedClose,
             '"' => self.readString(),
             ';' => {
                 self.pos += 1;
@@ -85,6 +87,52 @@ pub const Reader = struct {
         }
     }
 
+    /// Read [a b c] → (cons a (cons b (cons c ()))), [a | b] → (cons a b)
+    /// Produces source-level cons expressions, not pre-built data.
+    fn readSquareList(self: *Reader) ReadError!Value {
+        self.pos += 1; // skip [
+        var items = std.ArrayListUnmanaged(Value){};
+        var bar_tail: ?Value = null;
+
+        while (true) {
+            self.skipWhitespace();
+            if (self.pos >= self.input.len) return error.UnterminatedList;
+            if (self.input[self.pos] == ']') {
+                self.pos += 1;
+                break;
+            }
+            const val = try self.read();
+            // Check for | (bar notation for dotted tail)
+            if (val == .symbol) {
+                const name = self.vm.pool.getName(val.symbol);
+                if (std.mem.eql(u8, name, "|")) {
+                    bar_tail = try self.read();
+                    self.skipWhitespace();
+                    if (self.pos < self.input.len and self.input[self.pos] == ']') {
+                        self.pos += 1;
+                        break;
+                    }
+                    return error.UnterminatedList;
+                }
+            }
+            items.append(self.vm.allocator, val) catch return error.OutOfMemory;
+        }
+
+        // Build (cons a (cons b (cons c tail))) as source expression
+        const cons_sym = self.vm.internSym("cons") catch return error.OutOfMemory;
+        var result: Value = bar_tail orelse .nil;
+        var i = items.items.len;
+        while (i > 0) {
+            i -= 1;
+            // Build (cons item result) as a 3-element list
+            const inner = self.vm.makeCons(result, .nil) catch return error.OutOfMemory;
+            const mid = self.vm.makeCons(items.items[i], inner) catch return error.OutOfMemory;
+            result = self.vm.makeCons(cons_sym, mid) catch return error.OutOfMemory;
+        }
+        items.deinit(self.vm.allocator);
+        return result;
+    }
+
     fn readString(self: *Reader) !Value {
         self.pos += 1; // skip opening "
         const start = self.pos;
@@ -101,7 +149,7 @@ pub const Reader = struct {
         const start = self.pos;
         while (self.pos < self.input.len) {
             switch (self.input[self.pos]) {
-                ' ', '\t', '\n', '\r', '(', ')', '"', ';' => break,
+                ' ', '\t', '\n', '\r', '(', ')', '[', ']', '"', ';' => break,
                 else => self.pos += 1,
             }
         }
