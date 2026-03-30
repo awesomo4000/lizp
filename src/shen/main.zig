@@ -171,6 +171,7 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
     const boot_phases = [_][]const u8{
         // Phase 1: core environment setup
         "(shen.initialise-environment)",
+        "(trap-error (shen.initialise-signedfuncs) (lambda E ()))",
         "(trap-error (stlib.initialise-environment) (lambda E ()))",
         "(trap-error (shen.x.features.initialise ()) (lambda E ()))",
     };
@@ -198,6 +199,19 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
         \\  (value shen.*system*))
     , &env, vm);
 
+    // Patch fn to auto-build lambda forms on miss
+    evalSrc(
+        \\(defun fn (X)
+        \\  (cond ((= (arity X) 0) (X))
+        \\        (true (trap-error
+        \\                (get X shen.lambda-form (value *property-vector*))
+        \\                (lambda E
+        \\                  (let Entry (shen.lambda-entry X)
+        \\                    (if (cons? Entry)
+        \\                        (do (shen.set-lambda-form-entry Entry) (tl Entry))
+        \\                        (simple-error (cn "fn: " (shen.app X " is undefined\n" shen.a))))))))))
+    , &env, vm);
+
     std.debug.print(" done.\n", .{});
 
     std.debug.print("Shen ready.\n\n", .{});
@@ -216,6 +230,10 @@ fn evalSrc(src: []const u8, env: *Env, vm: *Vm) void {
 
 fn repl_with_env(vm: *Vm, env: *Env) void {
     const stdin = std.fs.File.stdin();
+
+    // Look up Shen's eval function for macro expansion + shen->kl
+    const eval_sym = vm.pool.intern("eval") catch unreachable;
+    const shen_eval = vm.functions.get(eval_sym);
 
     while (true) {
         std.debug.print("shen>> ", .{});
@@ -240,10 +258,20 @@ fn repl_with_env(vm: *Vm, env: *Env) void {
 
         var result: Value = .nil;
         for (exprs) |expr| {
-            result = eval_mod.eval(expr, env, vm) catch |err| {
-                std.debug.print("error: {s}\n", .{@errorName(err)});
-                continue;
-            };
+            // Route through Shen's eval (macroexpand -> shen->kl -> eval-kl)
+            if (shen_eval) |f| {
+                result = eval_mod.apply(f, &[_]Value{expr}, vm) catch |err| {
+                    const msg = if (err == error.ShenError) vm.last_error else @errorName(err);
+                    std.debug.print("error: {s}\n", .{msg});
+                    continue;
+                };
+            } else {
+                // Fallback to raw KL eval if Shen's eval not available
+                result = eval_mod.eval(expr, env, vm) catch |err| {
+                    std.debug.print("error: {s}\n", .{@errorName(err)});
+                    continue;
+                };
+            }
         }
 
         const s = printer_mod.valueToString(vm, result) catch |err| {
