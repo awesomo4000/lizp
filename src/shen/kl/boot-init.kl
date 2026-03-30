@@ -26,15 +26,25 @@
       V))
 
 
-(shen.record-macro shen.declare-macro (lambda X (shen.declare-macro X)))
+\* Macro: quote both args in shen.typecheck.
+   Rewrites (shen.typecheck Expr Type) to (shen.typecheck* QuotedExpr QuotedType)
+   so the type checker gets source expressions, not evaluated values. *\
+(defun shen.typecheck* (Expr Type) (shen.typecheck Expr Type))
 
-\* Override type to actually typecheck when tc+ is on *\
-(defun type (X T)
-  (if (value shen.*tc*)
-      (if (= false (shen.typecheck X T))
-          (simple-error (cn "type error: " (shen.app X (cn " is not of type " (shen.app T "" shen.a)) shen.a)))
-          X)
-      X))
+(defun shen.typecheck-macro (V)
+  (if (and (cons? V) (and (= shen.typecheck (hd V))
+          (and (cons? (tl V)) (and (cons? (tl (tl V)))
+                                   (= () (tl (tl (tl V))))))))
+      (cons shen.typecheck* (cons (shen.rcons_form (hd (tl V)))
+                             (cons (shen.rcons_form (hd (tl (tl V)))) ())))
+      V))
+
+(shen.record-macro shen.declare-macro (lambda X (shen.declare-macro X)))
+(shen.record-macro shen.typecheck-macro (lambda X (shen.typecheck-macro X)))
+
+\* type is handled as a primitive — just returns the value.
+   The type checker handles (type X T) through shen.system-S-h
+   when expressions go through shen.typecheck. *\
 
 \* Patch fn to auto-build lambda forms on miss *\
 (defun fn (X)

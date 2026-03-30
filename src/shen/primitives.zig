@@ -584,7 +584,7 @@ const primitives_table = [_]PrimDef{
     .{ .name = "stinput", .func = native(stinput_) },
     .{ .name = "hdstr", .func = native(hdstr_) },
     .{ .name = "shen.app", .func = native(shenApp) },
-    .{ .name = "thaw", .func = native(thaw) },
+    // thaw is defined in KL as (defun thaw (X) (X)) — uses eval TCO loop
     .{ .name = "map", .func = native(mapFn) },
     .{ .name = "reverse", .func = native(reverseFn) },
     .{ .name = "append", .func = native(appendFn) },

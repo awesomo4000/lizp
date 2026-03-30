@@ -207,26 +207,39 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
     }
 }
 
-/// Apply a function to arguments
+/// Apply a function to arguments — iterative to avoid stack growth
 pub fn apply(func: Value, args: []const Value, vm: *Vm) anyerror!Value {
-    switch (func) {
-        .native_fn => |native| return types.callNative(native, args, vm.asOpaque()),
-        .closure => |cls| {
-            const total = cls.applied.len + args.len;
-            if (total < cls.arity) {
-                return vm.makePartial(cls, args);
-            }
-            if (total == cls.arity) {
-                const new_env = try bindClosureArgs(cls, args, vm);
-                return eval(cls.body, new_env, vm);
-            }
-            // Over-apply
-            const needed = cls.arity - cls.applied.len;
-            const new_env = try bindClosureArgs(cls, args[0..needed], vm);
-            const intermediate = try eval(cls.body, new_env, vm);
-            return apply(intermediate, args[needed..], vm);
-        },
-        else => return error.NotAFunction,
+    var current_func = func;
+    var current_args = args;
+
+    while (true) {
+        switch (current_func) {
+            .native_fn => |native| return types.callNative(native, current_args, vm.asOpaque()),
+            .closure => |cls| {
+                const total = cls.applied.len + current_args.len;
+                if (total < cls.arity) {
+                    return vm.makePartial(cls, current_args);
+                }
+                if (total == cls.arity) {
+                    const new_env = try bindClosureArgs(cls, current_args, vm);
+                    return eval(cls.body, new_env, vm);
+                }
+                // Over-apply: apply fully, then loop with remaining args
+                const needed = cls.arity - cls.applied.len;
+                const new_env = try bindClosureArgs(cls, current_args[0..needed], vm);
+                current_func = try eval(cls.body, new_env, vm);
+                current_args = current_args[needed..];
+                continue; // trampoline — don't recurse
+            },
+            .symbol => {
+                if (vm.functions.get(current_func.symbol)) |f| {
+                    current_func = f;
+                    continue; // resolve and retry
+                }
+                return error.NotAFunction;
+            },
+            else => return error.NotAFunction,
+        }
     }
 }
 
