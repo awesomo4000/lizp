@@ -188,11 +188,14 @@ fn compileLetBindings(
 
     const rest_fn = compileLetBindings(rest, body, new_env);
 
+    const n = env.len;
     return &struct {
         fn f(args: []const i64) i64 {
             const bound_val = val_fn(args);
-            const extended = args ++ &[_]i64{bound_val};
-            return rest_fn(extended);
+            var extended: [n + 1]i64 = undefined;
+            @memcpy(extended[0..n], args[0..n]);
+            extended[n] = bound_val;
+            return rest_fn(&extended);
         }
     }.f;
 }

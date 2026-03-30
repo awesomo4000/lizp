@@ -244,9 +244,19 @@ test "compile if" {
     try testing.expectEqual(@as(i64, 7), f(7));
 }
 
-// NOTE: compile let is a known limitation — runtime array concat
-// doesn't work in compiled output. Skipped until compiler rework.
-// test "compile let" { ... }
+test "compile let" {
+    const f = comptime compiler.Fn1("(let [y (* x x)] (+ y y))", "x");
+    try testing.expectEqual(@as(i64, 98), f(7));
+}
+
+test "compile nested let" {
+    const f = comptime compiler.Fn2(
+        "(let [sum (+ a b) diff (- a b)] (* sum diff))",
+        "a",
+        "b",
+    );
+    try testing.expectEqual(@as(i64, 91), f(10, 3)); // (10+3)*(10-3) = 13*7
+}
 
 test "compile comparisons" {
     const eq = comptime compiler.Fn2("(= a b)", "a", "b");
