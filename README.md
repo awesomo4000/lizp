@@ -37,6 +37,7 @@ The interpreter supports:
 - Closures with lexical capture
 - Recursion via self-passing (U-combinator)
 - Multi-expression programs via `runProgram` (with `def` and `defn`)
+- Macros: `when`, `unless`, `cond`, `->`, `->>`, `and`, `or`
 
 The compiler supports a subset for native codegen:
 
@@ -82,4 +83,16 @@ const factorial = lizp.RecFn1(
     "self", "n",
 );
 factorial(12) // 479001600 — pure machine code, no interpreter
+
+// Macros expand before eval
+const r = lizp.expandAndEval("(-> 1 (+ 2) (* 3))"); // "9"
+
+// Bridge: lisp s-expressions → real Zig types
+const User = lizp.synthesizeType(lizp.read(
+    "(struct (field name string) (field age int) (field active bool))",
+));
+// User is a real Zig struct { name: []const u8, age: i64, active: bool }
+
+// Compile-time assertions in lisp
+comptime lizp.assertLisp("(= (+ 2 3) 5)");
 ```

@@ -2,6 +2,8 @@ const std = @import("std");
 const testing = std.testing;
 const lisp = @import("lisp.zig");
 const compiler = @import("compiler.zig");
+const macros = @import("macros.zig");
+const bridge = @import("bridge.zig");
 
 // ============================================================
 // Interpreter tests
@@ -342,4 +344,168 @@ test "compile recursive with let" {
     );
     // same as sum_to
     try testing.expectEqual(@as(i64, 55), f(10));
+}
+
+// ============================================================
+// Macro tests
+// ============================================================
+
+test "when true" {
+    try testing.expectEqualStrings("300", comptime macros.expandAndEval("(when (> 10 5) (+ 100 200))"));
+}
+
+test "when false" {
+    try testing.expectEqualStrings("nil", comptime macros.expandAndEval("(when (< 10 5) (+ 100 200))"));
+}
+
+test "unless true" {
+    try testing.expectEqualStrings("nil", comptime macros.expandAndEval("(unless (> 10 5) (+ 100 200))"));
+}
+
+test "unless false" {
+    try testing.expectEqualStrings("300", comptime macros.expandAndEval("(unless (< 10 5) (+ 100 200))"));
+}
+
+test "cond" {
+    try testing.expectEqualStrings("10", comptime macros.expandAndEval(
+        \\(cond
+        \\  [(= 1 2) 0]
+        \\  [(= 1 1) 10]
+        \\  [:else 20])
+    ));
+}
+
+test "cond else" {
+    try testing.expectEqualStrings("20", comptime macros.expandAndEval(
+        \\(cond
+        \\  [(= 1 2) 0]
+        \\  [(= 1 3) 10]
+        \\  [:else 20])
+    ));
+}
+
+test "thread first" {
+    // (-> 1 (+ 2) (* 3)) → (* (+ 1 2) 3) → 9
+    try testing.expectEqualStrings("9", comptime macros.expandAndEval("(-> 1 (+ 2) (* 3))"));
+}
+
+test "thread last" {
+    // (->> 1 (+ 2) (* 3)) → (* 3 (+ 2 1)) → 9
+    try testing.expectEqualStrings("9", comptime macros.expandAndEval("(->> 1 (+ 2) (* 3))"));
+}
+
+test "and all true" {
+    try testing.expectEqualStrings("true", comptime macros.expandAndEval("(and (> 10 5) (< 3 7))"));
+}
+
+test "and short circuit" {
+    try testing.expectEqualStrings("false", comptime macros.expandAndEval("(and (> 1 5) (< 3 7))"));
+}
+
+test "or first true" {
+    try testing.expectEqualStrings("true", comptime macros.expandAndEval("(or (> 10 5) (< 3 7))"));
+}
+
+test "or fallthrough" {
+    try testing.expectEqualStrings("true", comptime macros.expandAndEval("(or (> 1 5) (< 3 7))"));
+}
+
+test "or all false" {
+    try testing.expectEqualStrings("false", comptime macros.expandAndEval("(or (> 1 5) (< 7 3))"));
+}
+
+test "expand shows expansion" {
+    try testing.expectEqualStrings(
+        "(if (> 10 5) (do (+ 100 200)) nil)",
+        comptime macros.expandAndShow("(when (> 10 5) (+ 100 200))"),
+    );
+}
+
+test "nested macros" {
+    // (when (and (> 10 5) (< 3 7)) (+ 100 200))
+    try testing.expectEqualStrings("300", comptime macros.expandAndEval(
+        "(when (and (> 10 5) (< 3 7)) (+ 100 200))",
+    ));
+}
+
+// ============================================================
+// Bridge tests
+// ============================================================
+
+test "synthesize struct" {
+    const User = comptime bridge.synthesizeType(lisp.read(
+        "(struct (field name string) (field age int) (field active bool))",
+    ));
+    try testing.expectEqual(@as(usize, 3), @typeInfo(User).@"struct".fields.len);
+}
+
+test "synthesize enum" {
+    const Color = comptime bridge.synthesizeType(lisp.read(
+        "(enum red green blue)",
+    ));
+    const info = @typeInfo(Color).@"enum";
+    try testing.expectEqual(@as(usize, 3), info.fields.len);
+}
+
+test "synthesize union" {
+    const Shape = comptime bridge.synthesizeType(lisp.read(
+        "(union (variant circle f64) (variant rect i64))",
+    ));
+    const info = @typeInfo(Shape).@"union";
+    try testing.expectEqual(@as(usize, 2), info.fields.len);
+}
+
+test "synthesize array" {
+    const Arr = comptime bridge.synthesizeType(lisp.read("(array 4 i32)"));
+    try testing.expectEqual(@as(usize, 4), @typeInfo(Arr).array.len);
+    try testing.expect(@typeInfo(Arr).array.child == i32);
+}
+
+test "synthesize optional" {
+    const Opt = comptime bridge.synthesizeType(lisp.read("(optional int)"));
+    try testing.expect(@typeInfo(Opt).optional.child == i64);
+}
+
+test "verify type assertions" {
+    const User = comptime bridge.synthesizeType(lisp.read(
+        "(struct (field name string) (field age int))",
+    ));
+    comptime bridge.verifyType(User, lisp.read(
+        "((has name string) (has age int) (field-count 2))",
+    ));
+}
+
+test "synthesize protocol" {
+    const Msg = comptime bridge.synthesizeProtocol(lisp.read(
+        "(protocol (message Ping (field seq int)) (message Pong (field seq int) (field data string)))",
+    ));
+    const info = @typeInfo(Msg).@"union";
+    try testing.expectEqual(@as(usize, 2), info.fields.len);
+}
+
+test "effect set" {
+    const Effects = comptime bridge.EffectSet(lisp.read("(:io :net :fs)"));
+    try testing.expect(comptime bridge.hasEffect(Effects, ":io"));
+    try testing.expect(comptime bridge.hasEffect(Effects, ":net"));
+    try testing.expect(!comptime bridge.isPure(Effects));
+
+    const After = comptime bridge.removeEffect(
+        bridge.removeEffect(
+            bridge.removeEffect(Effects, ":io"),
+            ":net",
+        ),
+        ":fs",
+    );
+    try testing.expect(comptime bridge.isPure(After));
+}
+
+test "dependent type VecFromLisp" {
+    const V = comptime bridge.VecFromLisp("(* 3 3)", "f64");
+    try testing.expectEqual(@as(usize, 9), V.len);
+    try testing.expect(V.ElemType == f64);
+}
+
+test "assertLisp" {
+    comptime bridge.assertLisp("(= (+ 2 3) 5)");
+    comptime bridge.assertLispEq("(* 6 7)", "42");
 }
