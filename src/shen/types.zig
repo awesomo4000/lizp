@@ -363,40 +363,14 @@ pub const Vm = struct {
         return Value{ .symbol = idx };
     }
 
-    /// Check if a pointer falls within the nursery arena's memory.
-    /// Uses the arena's internal state to walk page buffers.
-    fn isNurseryPtr(self: *Vm, ptr: [*]const u8) bool {
-        const addr = @intFromPtr(ptr);
-        // Walk the arena's buffer list via its opaque state
-        // ArenaAllocator.state.buffer_list is a linked list of pages
-        // Each page: prev ptr + data length, content follows
-        const state_ptr: [*]const usize = @ptrCast(@alignCast(&self.nursery_arena.state));
-        var node_addr = state_ptr[0]; // buffer_list pointer
-        while (node_addr != 0) {
-            const node: [*]const usize = @ptrFromInt(node_addr);
-            const prev = node[0]; // prev pointer
-            const data_len = node[1]; // data field (total buffer size)
-            const buf_start = node_addr;
-            const buf_end = buf_start + data_len;
-            if (addr >= buf_start and addr < buf_end) return true;
-            node_addr = prev;
-        }
-        return false;
-    }
-
     /// Deep-copy a value from nursery to tenured allocator.
     /// Scalars (nil, bool, int, float, symbol) are returned as-is.
-    /// Values already in tenured are returned as-is.
-    /// Heap types (cons, closure, string, vector, err) in nursery are copied.
+    /// Heap types (cons, closure, string, vector, err) are copied.
     pub fn promote(self: *Vm, val: Value) error{OutOfMemory}!Value {
         return switch (val) {
             .nil, .boolean, .integer, .float, .symbol, .native_fn, .stream => val,
-            .string => |s| {
-                if (!self.isNurseryPtr(s.ptr)) return val;
-                return Value{ .string = try self.allocator.dupe(u8, s) };
-            },
+            .string => |s| Value{ .string = try self.allocator.dupe(u8, s) },
             .cons => |c| {
-                if (!self.isNurseryPtr(@ptrCast(c))) return val;
                 const new_cell = try self.allocator.create(Cell);
                 new_cell.* = .{
                     .car = try self.promote(c.car),
@@ -405,7 +379,6 @@ pub const Vm = struct {
                 return Value{ .cons = new_cell };
             },
             .closure => |cls| {
-                if (!self.isNurseryPtr(@ptrCast(cls))) return val;
                 const new_cls = try self.allocator.create(Closure);
                 const new_params = try self.allocator.dupe(u32, cls.params);
                 const new_applied = try self.allocator.alloc(Value, cls.applied.len);
@@ -424,8 +397,6 @@ pub const Vm = struct {
                 return Value{ .closure = new_cls };
             },
             .vector => |v| {
-                // Vectors are always created in tenured, just promote contents
-                if (!self.isNurseryPtr(@ptrCast(v))) return val;
                 const new_data = try self.allocator.alloc(Value, v.data.len);
                 for (v.data, 0..) |item, i| {
                     new_data[i] = try self.promote(item);
@@ -435,7 +406,6 @@ pub const Vm = struct {
                 return Value{ .vector = new_vec };
             },
             .err => |e| {
-                if (!self.isNurseryPtr(@ptrCast(e))) return val;
                 const new_e = try self.allocator.create(ShenError);
                 new_e.* = .{ .message = try self.allocator.dupe(u8, e.message) };
                 return Value{ .err = new_e };
@@ -445,7 +415,6 @@ pub const Vm = struct {
 
     /// Deep-copy an env chain to tenured.
     fn promoteEnv(self: *Vm, env: *Env) error{OutOfMemory}!*Env {
-        if (!self.isNurseryPtr(@ptrCast(env))) return env;
         const new_env = try self.allocator.create(Env);
         new_env.* = Env.init(if (env.parent) |p| try self.promoteEnv(p) else null);
         for (env.bindings.items) |b| {

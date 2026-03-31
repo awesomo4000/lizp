@@ -220,10 +220,7 @@ fn evalSrc(src: []const u8, env: *Env, vm: *Vm) void {
 
 fn repl_with_env(vm: *Vm, env: *Env) void {
     const stdin = std.fs.File.stdin();
-
-    // Look up Shen's eval function for macro expansion + shen->kl
     const eval_sym = vm.pool.intern("eval") catch unreachable;
-    const shen_eval = vm.functions.get(eval_sym);
 
     while (true) {
         std.debug.print("shen>> ", .{});
@@ -248,7 +245,8 @@ fn repl_with_env(vm: *Vm, env: *Env) void {
 
         var result: Value = .nil;
         for (exprs) |expr| {
-            // Route through Shen's eval (macroexpand -> shen->kl -> eval-kl)
+            // Look up fresh each iteration — nursery reset invalidates old pointers
+            const shen_eval = vm.functions.get(eval_sym);
             if (shen_eval) |f| {
                 result = eval_mod.apply(f, &[_]Value{expr}, vm) catch |err| {
                     const msg = if (err == error.ShenError) vm.last_error else @errorName(err);

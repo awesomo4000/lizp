@@ -108,7 +108,7 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                         const body = listNth(tail, 2);
                         const val = try eval(val_expr, current_env, vm);
                         const new_env = try makeEnv(vm, current_env);
-                        try new_env.bind(vm.allocator, name_sym, val);
+                        try new_env.bind(vm.nursery, name_sym, val);
                         current = body;
                         current_env = new_env;
                         continue; // TCO
@@ -266,7 +266,24 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                 else
                     try eval(head, current_env, vm);
 
-                const args = try evalList(tail, current_env, vm);
+                // Eval args into stack buffer (avoid nursery alloc for <=8 args)
+                var arg_buf: [8]Value = undefined;
+                var arg_count: usize = 0;
+                var args: []const Value = undefined;
+                {
+                    var cur = tail;
+                    while (cur == .cons and arg_count < arg_buf.len) {
+                        arg_buf[arg_count] = try eval(cur.cons.car, current_env, vm);
+                        arg_count += 1;
+                        cur = cur.cons.cdr;
+                    }
+                    if (cur == .cons) {
+                        // >8 args: fall back to heap
+                        args = try evalListFromPartial(&arg_buf, arg_count, cur, current_env, vm);
+                    } else {
+                        args = arg_buf[0..arg_count];
+                    }
+                }
 
                 if (func == .native_fn) {
                     return types.callNative(func.native_fn, args, vm.asOpaque());
@@ -277,13 +294,15 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                     const total_args = cls.applied.len + args.len;
 
                     if (total_args < cls.arity) {
-                        return vm.makePartial(cls, args);
+                        // Partial apply needs heap copy of args
+                        const heap_args = try vm.nursery.dupe(Value, args);
+                        return vm.makePartial(cls, heap_args);
                     }
 
                     if (total_args == cls.arity) {
                         current_env = try bindClosureArgs(cls, args, vm);
                         current = cls.body;
-                        continue; // TCO
+                        continue :tco;
                     }
 
                     // Over-application
@@ -346,6 +365,19 @@ fn listNth(list: Value, n: usize) Value {
         i += 1;
     }
     return .nil;
+}
+
+/// Continue evalList when stack buffer overflowed (>8 args)
+fn evalListFromPartial(buf: []Value, count: usize, remaining: Value, env: *Env, vm: *Vm) anyerror![]const Value {
+    var items = std.ArrayListUnmanaged(Value){};
+    try items.appendSlice(vm.nursery, buf[0..count]);
+    var cur = remaining;
+    while (cur == .cons) {
+        const val = try eval(cur.cons.car, env, vm);
+        try items.append(vm.nursery, val);
+        cur = cur.cons.cdr;
+    }
+    return items.toOwnedSlice(vm.nursery);
 }
 
 fn evalList(list: Value, env: *Env, vm: *Vm) anyerror![]const Value {
