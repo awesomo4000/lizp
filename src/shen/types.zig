@@ -182,9 +182,67 @@ pub const InternPool = struct {
 // --- VM State ---
 // Central state passed to all primitives and the eval loop.
 
+/// Fixed-size nursery with bump allocation and fast pointer membership check.
+pub const Nursery = struct {
+    buf: []u8,
+    pos: usize,
+
+    pub fn init(size: usize) !Nursery {
+        const buf = try std.heap.page_allocator.alloc(u8, size);
+        return .{ .buf = buf, .pos = 0 };
+    }
+
+    pub fn deinit(self: *Nursery) void {
+        std.heap.page_allocator.free(self.buf);
+    }
+
+    pub fn contains(self: *const Nursery, addr: usize) bool {
+        const lo = @intFromPtr(self.buf.ptr);
+        return addr >= lo and addr < lo + self.buf.len;
+    }
+
+    pub fn reset(self: *Nursery) void {
+        self.pos = 0;
+    }
+
+    pub fn allocator(self: *Nursery) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+        const self: *Nursery = @ptrCast(@alignCast(ctx));
+        const align_val = alignment.toByteUnits();
+        const aligned_pos = (self.pos + align_val - 1) & ~(align_val - 1);
+        if (aligned_pos + len > self.buf.len) return null; // OOM
+        const ptr = self.buf.ptr + aligned_pos;
+        self.pos = aligned_pos + len;
+        return ptr;
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {
+        // no-op — nursery freed in bulk via reset
+    }
+};
+
 pub const Vm = struct {
     allocator: std.mem.Allocator, // tenured — long-lived allocations
-    nursery_arena: *std.heap.ArenaAllocator, // heap-allocated to avoid self-ref move
+    nursery_state: *Nursery,
     nursery: std.mem.Allocator, // fast bump allocator for temporaries
     pool: InternPool,
 
@@ -262,12 +320,12 @@ pub const Vm = struct {
         const s_value = try pool.intern("value");
         const s_set = try pool.intern("set");
         const s_do = try pool.intern("do");
-        const nursery_arena = try allocator.create(std.heap.ArenaAllocator);
-        nursery_arena.* = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        const nursery_state = try allocator.create(Nursery);
+        nursery_state.* = try Nursery.init(64 * 1024 * 1024); // 64MB nursery
         return .{
             .allocator = allocator,
-            .nursery_arena = nursery_arena,
-            .nursery = nursery_arena.allocator(),
+            .nursery_state = nursery_state,
+            .nursery = nursery_state.allocator(),
             .pool = pool,
             .globals = .{},
             .functions = .{},
@@ -363,14 +421,22 @@ pub const Vm = struct {
         return Value{ .symbol = idx };
     }
 
+    /// Check if an address is in the nursery.
+    fn isNursery(self: *const Vm, addr: usize) bool {
+        return self.nursery_state.contains(addr);
+    }
+
     /// Deep-copy a value from nursery to tenured allocator.
-    /// Scalars (nil, bool, int, float, symbol) are returned as-is.
-    /// Heap types (cons, closure, string, vector, err) are copied.
+    /// Scalars and already-tenured values are returned as-is.
     pub fn promote(self: *Vm, val: Value) error{OutOfMemory}!Value {
         return switch (val) {
             .nil, .boolean, .integer, .float, .symbol, .native_fn, .stream => val,
-            .string => |s| Value{ .string = try self.allocator.dupe(u8, s) },
+            .string => |s| {
+                if (!self.isNursery(@intFromPtr(s.ptr))) return val;
+                return Value{ .string = try self.allocator.dupe(u8, s) };
+            },
             .cons => |c| {
+                if (!self.isNursery(@intFromPtr(c))) return val;
                 const new_cell = try self.allocator.create(Cell);
                 new_cell.* = .{
                     .car = try self.promote(c.car),
@@ -379,6 +445,7 @@ pub const Vm = struct {
                 return Value{ .cons = new_cell };
             },
             .closure => |cls| {
+                if (!self.isNursery(@intFromPtr(cls))) return val;
                 const new_cls = try self.allocator.create(Closure);
                 const new_params = try self.allocator.dupe(u32, cls.params);
                 const new_applied = try self.allocator.alloc(Value, cls.applied.len);
@@ -397,6 +464,7 @@ pub const Vm = struct {
                 return Value{ .closure = new_cls };
             },
             .vector => |v| {
+                if (!self.isNursery(@intFromPtr(v))) return val;
                 const new_data = try self.allocator.alloc(Value, v.data.len);
                 for (v.data, 0..) |item, i| {
                     new_data[i] = try self.promote(item);
@@ -406,6 +474,7 @@ pub const Vm = struct {
                 return Value{ .vector = new_vec };
             },
             .err => |e| {
+                if (!self.isNursery(@intFromPtr(e))) return val;
                 const new_e = try self.allocator.create(ShenError);
                 new_e.* = .{ .message = try self.allocator.dupe(u8, e.message) };
                 return Value{ .err = new_e };
@@ -415,6 +484,7 @@ pub const Vm = struct {
 
     /// Deep-copy an env chain to tenured.
     fn promoteEnv(self: *Vm, env: *Env) error{OutOfMemory}!*Env {
+        if (!self.isNursery(@intFromPtr(env))) return env;
         const new_env = try self.allocator.create(Env);
         new_env.* = Env.init(if (env.parent) |p| try self.promoteEnv(p) else null);
         for (env.bindings.items) |b| {
@@ -428,7 +498,7 @@ pub const Vm = struct {
 
     /// Reset nursery — call after each top-level eval.
     /// The return value from eval must be promoted first.
-    /// Also promotes all vector contents since vectors are tenured but may hold nursery values.
+    /// Promotes all vector contents, globals, and functions that point into nursery.
     pub fn resetNursery(self: *Vm) void {
         // Promote all vector contents to tenured before wiping nursery
         for (self.vectors.items) |vec| {
@@ -446,12 +516,12 @@ pub const Vm = struct {
         while (fit.next()) |val_ptr| {
             val_ptr.* = self.promote(val_ptr.*) catch val_ptr.*;
         }
-        _ = self.nursery_arena.reset(.retain_capacity);
+        self.nursery_state.reset();
     }
 
     pub fn deinit(self: *Vm) void {
-        self.nursery_arena.deinit();
-        self.allocator.destroy(self.nursery_arena);
+        self.nursery_state.deinit();
+        self.allocator.destroy(self.nursery_state);
         self.pool.deinit();
         self.globals.deinit(self.allocator);
         self.functions.deinit(self.allocator);
