@@ -117,7 +117,7 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                     if (sym == vm.sym_lambda) {
                         const param_sym = listNth(tail, 0).symbol;
                         const body = listNth(tail, 1);
-                        const params = try vm.allocator.alloc(u32, 1);
+                        const params = try vm.nursery.alloc(u32, 1);
                         params[0] = param_sym;
                         return vm.makeClosure(params, body, current_env, null);
                     }
@@ -133,8 +133,10 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                         const body = listNth(tail, 2);
                         const params = try listToSymArray(params_list, vm);
                         const func = try vm.makeClosure(params, body, current_env, name_sym);
-                        try vm.functions.put(vm.allocator, name_sym, func);
-                        return func;
+                        // Promote to tenured — defun'd functions are long-lived
+                        const tenured_func = try vm.promote(func);
+                        try vm.functions.put(vm.allocator, name_sym, tenured_func);
+                        return tenured_func;
                     }
 
                     // Inlined primitives — avoid function lookup + evalList + dispatch
@@ -228,8 +230,10 @@ pub fn eval(expr: Value, env: *Env, vm: *Vm) anyerror!Value {
                         const s = try eval(listNth(tail, 0), current_env, vm);
                         const v = try eval(listNth(tail, 1), current_env, vm);
                         if (s != .symbol) return error.TypeError;
-                        try vm.globals.put(vm.allocator, s.symbol, v);
-                        return v;
+                        // Promote to tenured — globals are long-lived
+                        const tenured_v = try vm.promote(v);
+                        try vm.globals.put(vm.allocator, s.symbol, tenured_v);
+                        return tenured_v;
                     }
                     if (sym == vm.sym_do) {
                         _ = try eval(listNth(tail, 0), current_env, vm);
@@ -358,21 +362,21 @@ fn evalList(list: Value, env: *Env, vm: *Vm) anyerror![]const Value {
     }
 
     if (cur != .cons) {
-        // Fits in stack buffer — copy to arena (needed for lifetime)
-        const result = try vm.allocator.alloc(Value, count);
+        // Fits in stack buffer — copy to nursery (needed for lifetime within eval)
+        const result = try vm.nursery.alloc(Value, count);
         @memcpy(result, stack_buf[0..count]);
         return result;
     }
 
     // Rare: more than 8 args — fall back to dynamic
     var items = std.ArrayListUnmanaged(Value){};
-    try items.appendSlice(vm.allocator, stack_buf[0..count]);
+    try items.appendSlice(vm.nursery, stack_buf[0..count]);
     while (cur == .cons) {
         const val = try eval(cur.cons.car, env, vm);
-        try items.append(vm.allocator, val);
+        try items.append(vm.nursery, val);
         cur = cur.cons.cdr;
     }
-    return items.toOwnedSlice(vm.allocator);
+    return items.toOwnedSlice(vm.nursery);
 }
 
 fn listToSymArray(list: Value, vm: *Vm) ![]const u32 {
@@ -380,14 +384,14 @@ fn listToSymArray(list: Value, vm: *Vm) ![]const u32 {
     var cur = list;
     while (cur == .cons) {
         if (cur.cons.car != .symbol) return error.BadSpecialForm;
-        try items.append(vm.allocator, cur.cons.car.symbol);
+        try items.append(vm.nursery, cur.cons.car.symbol);
         cur = cur.cons.cdr;
     }
-    return items.toOwnedSlice(vm.allocator);
+    return items.toOwnedSlice(vm.nursery);
 }
 
 fn makeEnv(vm: *Vm, parent: *Env) !*Env {
-    const e = try vm.allocator.create(Env);
+    const e = try vm.nursery.create(Env);
     e.* = Env.init(parent);
     return e;
 }
@@ -401,7 +405,7 @@ fn bindClosureArgs(cls: *const Closure, args: []const Value, vm: *Vm) !*Env {
             cls.applied[i]
         else
             args[i - cls.applied.len];
-        try new_env.bind(vm.allocator, param, val);
+        try new_env.bind(vm.nursery, param, val);
         i += 1;
     }
     return new_env;

@@ -58,9 +58,9 @@ pub const Reader = struct {
             self.skipWhitespace();
             if (self.pos >= self.input.len) break;
             const expr = try self.read();
-            try exprs.append(self.vm.allocator, expr);
+            try exprs.append(self.vm.nursery, expr);
         }
-        return exprs.toOwnedSlice(self.vm.allocator);
+        return exprs.toOwnedSlice(self.vm.nursery);
     }
 
     fn readList(self: *Reader) ReadError!Value {
@@ -79,11 +79,11 @@ pub const Reader = struct {
                     i -= 1;
                     result = try self.vm.makeCons(items.items[i], result);
                 }
-                items.deinit(self.vm.allocator);
+                items.deinit(self.vm.nursery);
                 return result;
             }
             const val = try self.read();
-            try items.append(self.vm.allocator, val);
+            try items.append(self.vm.nursery, val);
         }
     }
 
@@ -115,7 +115,7 @@ pub const Reader = struct {
                     return error.UnterminatedList;
                 }
             }
-            items.append(self.vm.allocator, val) catch return error.OutOfMemory;
+            items.append(self.vm.nursery, val) catch return error.OutOfMemory;
         }
 
         // Build (cons a (cons b (cons c tail))) as source expression
@@ -129,7 +129,7 @@ pub const Reader = struct {
             const mid = self.vm.makeCons(items.items[i], inner) catch return error.OutOfMemory;
             result = self.vm.makeCons(cons_sym, mid) catch return error.OutOfMemory;
         }
-        items.deinit(self.vm.allocator);
+        items.deinit(self.vm.nursery);
         return result;
     }
 

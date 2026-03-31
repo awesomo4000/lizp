@@ -3,7 +3,9 @@ const std = @import("std");
 // ============================================================
 // Shen Kλ Kernel — Value Types
 //
-// Tagged union for all Kλ values. Arena-allocated, no GC.
+// Tagged union for all Kλ values.
+// Two-generation allocator: nursery (reset per top-level eval)
+// and tenured (long-lived globals, defuns, interned strings).
 // Numbers are dual i64/f64 with promotion on mixed ops.
 // Symbols are interned for O(1) comparison.
 // ============================================================
@@ -181,7 +183,9 @@ pub const InternPool = struct {
 // Central state passed to all primitives and the eval loop.
 
 pub const Vm = struct {
-    allocator: std.mem.Allocator,
+    allocator: std.mem.Allocator, // tenured — long-lived allocations
+    nursery_arena: *std.heap.ArenaAllocator, // heap-allocated to avoid self-ref move
+    nursery: std.mem.Allocator, // fast bump allocator for temporaries
     pool: InternPool,
 
     // Global symbol table (set/value)
@@ -225,9 +229,8 @@ pub const Vm = struct {
     gensym_counter: u64 = 0,
     last_error: []const u8 = "error",
 
-    // Cons cell bump allocator — avoids per-cell arena overhead
-    cell_slab: []Cell = &.{},
-    cell_next: usize = 0,
+    // Track all vectors for nursery promotion at reset time
+    vectors: std.ArrayListUnmanaged(*Vector) = .{},
 
     pub fn init(allocator: std.mem.Allocator) !Vm {
         var pool = InternPool.init(allocator);
@@ -259,8 +262,12 @@ pub const Vm = struct {
         const s_value = try pool.intern("value");
         const s_set = try pool.intern("set");
         const s_do = try pool.intern("do");
+        const nursery_arena = try allocator.create(std.heap.ArenaAllocator);
+        nursery_arena.* = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         return .{
             .allocator = allocator,
+            .nursery_arena = nursery_arena,
+            .nursery = nursery_arena.allocator(),
             .pool = pool,
             .globals = .{},
             .functions = .{},
@@ -295,21 +302,14 @@ pub const Vm = struct {
         };
     }
 
-    const CELL_SLAB_SIZE = 64 * 1024; // 64K cells per slab
-
     pub fn makeCons(self: *Vm, car: Value, cdr: Value) !Value {
-        if (self.cell_next >= self.cell_slab.len) {
-            self.cell_slab = try self.allocator.alloc(Cell, CELL_SLAB_SIZE);
-            self.cell_next = 0;
-        }
-        const cell = &self.cell_slab[self.cell_next];
-        self.cell_next += 1;
+        const cell = try self.nursery.create(Cell);
         cell.* = .{ .car = car, .cdr = cdr };
         return Value{ .cons = cell };
     }
 
     pub fn makeString(self: *Vm, s: []const u8) !Value {
-        const owned = try self.allocator.dupe(u8, s);
+        const owned = try self.nursery.dupe(u8, s);
         return Value{ .string = owned };
     }
 
@@ -322,7 +322,7 @@ pub const Vm = struct {
     }
 
     pub fn makeClosure(self: *Vm, params: []const u32, body: Value, env: *Env, name: ?u32) !Value {
-        const cls = try self.allocator.create(Closure);
+        const cls = try self.nursery.create(Closure);
         cls.* = .{
             .params = params,
             .body = body,
@@ -335,11 +335,11 @@ pub const Vm = struct {
     }
 
     pub fn makePartial(self: *Vm, base: *Closure, args: []const Value) !Value {
-        const new_applied = try self.allocator.alloc(Value, base.applied.len + args.len);
+        const new_applied = try self.nursery.alloc(Value, base.applied.len + args.len);
         @memcpy(new_applied[0..base.applied.len], base.applied);
         @memcpy(new_applied[base.applied.len..], args);
 
-        const cls = try self.allocator.create(Closure);
+        const cls = try self.nursery.create(Closure);
         cls.* = .{
             .params = base.params,
             .body = base.body,
@@ -352,8 +352,8 @@ pub const Vm = struct {
     }
 
     pub fn makeError(self: *Vm, msg: []const u8) !Value {
-        const e = try self.allocator.create(ShenError);
-        const owned = try self.allocator.dupe(u8, msg);
+        const e = try self.nursery.create(ShenError);
+        const owned = try self.nursery.dupe(u8, msg);
         e.* = .{ .message = owned };
         return Value{ .err = e };
     }
@@ -363,9 +363,129 @@ pub const Vm = struct {
         return Value{ .symbol = idx };
     }
 
+    /// Check if a pointer falls within the nursery arena's memory.
+    /// Uses the arena's internal state to walk page buffers.
+    fn isNurseryPtr(self: *Vm, ptr: [*]const u8) bool {
+        const addr = @intFromPtr(ptr);
+        // Walk the arena's buffer list via its opaque state
+        // ArenaAllocator.state.buffer_list is a linked list of pages
+        // Each page: prev ptr + data length, content follows
+        const state_ptr: [*]const usize = @ptrCast(@alignCast(&self.nursery_arena.state));
+        var node_addr = state_ptr[0]; // buffer_list pointer
+        while (node_addr != 0) {
+            const node: [*]const usize = @ptrFromInt(node_addr);
+            const prev = node[0]; // prev pointer
+            const data_len = node[1]; // data field (total buffer size)
+            const buf_start = node_addr;
+            const buf_end = buf_start + data_len;
+            if (addr >= buf_start and addr < buf_end) return true;
+            node_addr = prev;
+        }
+        return false;
+    }
+
+    /// Deep-copy a value from nursery to tenured allocator.
+    /// Scalars (nil, bool, int, float, symbol) are returned as-is.
+    /// Values already in tenured are returned as-is.
+    /// Heap types (cons, closure, string, vector, err) in nursery are copied.
+    pub fn promote(self: *Vm, val: Value) error{OutOfMemory}!Value {
+        return switch (val) {
+            .nil, .boolean, .integer, .float, .symbol, .native_fn, .stream => val,
+            .string => |s| {
+                if (!self.isNurseryPtr(s.ptr)) return val;
+                return Value{ .string = try self.allocator.dupe(u8, s) };
+            },
+            .cons => |c| {
+                if (!self.isNurseryPtr(@ptrCast(c))) return val;
+                const new_cell = try self.allocator.create(Cell);
+                new_cell.* = .{
+                    .car = try self.promote(c.car),
+                    .cdr = try self.promote(c.cdr),
+                };
+                return Value{ .cons = new_cell };
+            },
+            .closure => |cls| {
+                if (!self.isNurseryPtr(@ptrCast(cls))) return val;
+                const new_cls = try self.allocator.create(Closure);
+                const new_params = try self.allocator.dupe(u32, cls.params);
+                const new_applied = try self.allocator.alloc(Value, cls.applied.len);
+                for (cls.applied, 0..) |a, i| {
+                    new_applied[i] = try self.promote(a);
+                }
+                const new_env = try self.promoteEnv(cls.env);
+                new_cls.* = .{
+                    .params = new_params,
+                    .body = try self.promote(cls.body),
+                    .env = new_env,
+                    .name = cls.name,
+                    .arity = cls.arity,
+                    .applied = new_applied,
+                };
+                return Value{ .closure = new_cls };
+            },
+            .vector => |v| {
+                // Vectors are always created in tenured, just promote contents
+                if (!self.isNurseryPtr(@ptrCast(v))) return val;
+                const new_data = try self.allocator.alloc(Value, v.data.len);
+                for (v.data, 0..) |item, i| {
+                    new_data[i] = try self.promote(item);
+                }
+                const new_vec = try self.allocator.create(Vector);
+                new_vec.* = .{ .data = new_data };
+                return Value{ .vector = new_vec };
+            },
+            .err => |e| {
+                if (!self.isNurseryPtr(@ptrCast(e))) return val;
+                const new_e = try self.allocator.create(ShenError);
+                new_e.* = .{ .message = try self.allocator.dupe(u8, e.message) };
+                return Value{ .err = new_e };
+            },
+        };
+    }
+
+    /// Deep-copy an env chain to tenured.
+    fn promoteEnv(self: *Vm, env: *Env) error{OutOfMemory}!*Env {
+        if (!self.isNurseryPtr(@ptrCast(env))) return env;
+        const new_env = try self.allocator.create(Env);
+        new_env.* = Env.init(if (env.parent) |p| try self.promoteEnv(p) else null);
+        for (env.bindings.items) |b| {
+            try new_env.bindings.append(self.allocator, .{
+                .sym = b.sym,
+                .val = try self.promote(b.val),
+            });
+        }
+        return new_env;
+    }
+
+    /// Reset nursery — call after each top-level eval.
+    /// The return value from eval must be promoted first.
+    /// Also promotes all vector contents since vectors are tenured but may hold nursery values.
+    pub fn resetNursery(self: *Vm) void {
+        // Promote all vector contents to tenured before wiping nursery
+        for (self.vectors.items) |vec| {
+            for (vec.data) |*slot| {
+                slot.* = self.promote(slot.*) catch slot.*;
+            }
+        }
+        // Also promote all global values
+        var git = self.globals.valueIterator();
+        while (git.next()) |val_ptr| {
+            val_ptr.* = self.promote(val_ptr.*) catch val_ptr.*;
+        }
+        // And all function values
+        var fit = self.functions.valueIterator();
+        while (fit.next()) |val_ptr| {
+            val_ptr.* = self.promote(val_ptr.*) catch val_ptr.*;
+        }
+        _ = self.nursery_arena.reset(.retain_capacity);
+    }
+
     pub fn deinit(self: *Vm) void {
+        self.nursery_arena.deinit();
+        self.allocator.destroy(self.nursery_arena);
         self.pool.deinit();
         self.globals.deinit(self.allocator);
         self.functions.deinit(self.allocator);
+        self.vectors.deinit(self.allocator);
     }
 };

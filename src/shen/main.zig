@@ -61,8 +61,7 @@ fn printUsage() void {
 }
 
 fn evalString(input: []const u8, vm: *Vm) !void {
-    const env = try vm.allocator.create(Env);
-    env.* = Env.init(null);
+    var env = Env.init(null);
     var rd = Reader.init(input, vm);
     const exprs = rd.readAll() catch |err| {
         std.debug.print("read error: {s}\n", .{@errorName(err)});
@@ -71,7 +70,7 @@ fn evalString(input: []const u8, vm: *Vm) !void {
 
     var result: Value = .nil;
     for (exprs) |expr| {
-        result = eval_mod.eval(expr, env, vm) catch |err| {
+        result = eval_mod.eval(expr, &env, vm) catch |err| {
             std.debug.print("eval error: {s}\n", .{@errorName(err)});
             return;
         };
@@ -79,6 +78,7 @@ fn evalString(input: []const u8, vm: *Vm) !void {
 
     const s = try printer_mod.valueToString(vm, result);
     std.debug.print("{s}\n", .{s});
+    vm.resetNursery();
 }
 
 fn runFile(path: []const u8, vm: *Vm) !void {
@@ -195,6 +195,11 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
 
     std.debug.print("Shen ready.\n\n", .{});
 
+    // Boot complete — all defun/set values are either tenured (via promote)
+    // or in nursery but referenced by tenured structures. We can't safely
+    // reset nursery here because property vectors may hold nursery pointers.
+    // The REPL will reset nursery after each line.
+
     // Drop into REPL
     repl_with_env(vm, env);
 }
@@ -259,11 +264,15 @@ fn repl_with_env(vm: *Vm, env: *Env) void {
             }
         }
 
+        // Promote result to tenured before printing, then reset nursery
+        result = vm.promote(result) catch result;
         const s = printer_mod.valueToString(vm, result) catch |err| {
             std.debug.print("print error: {s}\n", .{@errorName(err)});
+            vm.resetNursery();
             continue;
         };
         std.debug.print("{s}\n", .{s});
+        vm.resetNursery();
     }
 }
 

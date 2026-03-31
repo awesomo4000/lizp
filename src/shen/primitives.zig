@@ -147,7 +147,7 @@ fn cn(args: []const Value, p: *anyopaque) anyerror!Value {
     const b = arg(args, 1);
     if (a != .string or b != .string) return error.TypeError;
     const m = vm(p);
-    const result = try m.allocator.alloc(u8, a.string.len + b.string.len);
+    const result = try m.nursery.alloc(u8, a.string.len + b.string.len);
     @memcpy(result[0..a.string.len], a.string);
     @memcpy(result[a.string.len..], b.string);
     return Value{ .string = result };
@@ -170,7 +170,7 @@ fn stringToN(args: []const Value, _: *anyopaque) anyerror!Value {
 fn nToString(args: []const Value, p: *anyopaque) anyerror!Value {
     const n = arg(args, 0);
     if (n != .integer) return error.TypeError;
-    const buf = try vm(p).allocator.alloc(u8, 1);
+    const buf = try vm(p).nursery.alloc(u8, 1);
     buf[0] = @intCast(n.integer);
     return Value{ .string = buf };
 }
@@ -188,8 +188,10 @@ fn set(args: []const Value, p: *anyopaque) anyerror!Value {
     const val = arg(args, 1);
     if (sym != .symbol) return error.TypeError;
     const m = vm(p);
-    try m.globals.put(m.allocator, sym.symbol, val);
-    return val;
+    // Promote to tenured — globals are long-lived
+    const tenured_val = try m.promote(val);
+    try m.globals.put(m.allocator, sym.symbol, tenured_val);
+    return tenured_val;
 }
 
 fn valueFn(args: []const Value, p: *anyopaque) anyerror!Value {
@@ -209,6 +211,8 @@ fn absvector(args: []const Value, p: *anyopaque) anyerror!Value {
     @memset(data, Value{ .symbol = m.sym_false });
     const vec = try m.allocator.create(types.Vector);
     vec.* = .{ .data = data };
+    // Track vector for nursery promotion at reset time
+    try m.vectors.append(m.allocator, vec);
     return Value{ .vector = vec };
 }
 
@@ -251,7 +255,7 @@ fn errorToString(args: []const Value, _: *anyopaque) anyerror!Value {
 
 fn evalKl(args: []const Value, p: *anyopaque) anyerror!Value {
     const m = vm(p);
-    const env = try m.allocator.create(Env);
+    const env = try m.nursery.create(Env);
     env.* = Env.init(null);
     return eval_mod.eval(arg(args, 0), env, m);
 }
@@ -356,7 +360,14 @@ fn concat_(args: []const Value, p: *anyopaque) anyerror!Value {
     const m = vm(p);
     const a_str = if (a == .symbol) m.pool.getName(a.symbol) else "";
     const b_str = if (b == .symbol) m.pool.getName(b.symbol) else "";
-    const result = try m.allocator.alloc(u8, a_str.len + b_str.len);
+    // Use stack buffer for concat — result goes to intern pool (tenured) anyway
+    var buf: [256]u8 = undefined;
+    if (a_str.len + b_str.len <= buf.len) {
+        @memcpy(buf[0..a_str.len], a_str);
+        @memcpy(buf[a_str.len..][0..b_str.len], b_str);
+        return m.internSym(buf[0 .. a_str.len + b_str.len]);
+    }
+    const result = try m.nursery.alloc(u8, a_str.len + b_str.len);
     @memcpy(result[0..a_str.len], a_str);
     @memcpy(result[a_str.len..], b_str);
     return m.internSym(result);
@@ -422,7 +433,7 @@ fn shenApp(args: []const Value, p: *anyopaque) anyerror!Value {
     const m = vm(p);
     const v_str = try printer.valueToString(m, v);
     const suffix_str = if (suffix == .string) suffix.string else "";
-    const result = try m.allocator.alloc(u8, v_str.len + suffix_str.len);
+    const result = try m.nursery.alloc(u8, v_str.len + suffix_str.len);
     @memcpy(result[0..v_str.len], v_str);
     @memcpy(result[v_str.len..], suffix_str);
     return Value{ .string = result };
@@ -442,7 +453,7 @@ fn mapFn(args: []const Value, p: *anyopaque) anyerror!Value {
     var cur = lst;
     while (cur == .cons) {
         const val = try eval_mod.apply(f, &[_]Value{cur.cons.car}, m);
-        try items.append(m.allocator, val);
+        try items.append(m.nursery, val);
         cur = cur.cons.cdr;
     }
     // Build cons list in reverse
@@ -451,7 +462,6 @@ fn mapFn(args: []const Value, p: *anyopaque) anyerror!Value {
         i -= 1;
         result = try m.makeCons(items.items[i], result);
     }
-    items.deinit(m.allocator);
     return result;
 }
 
@@ -476,7 +486,7 @@ fn appendFn(args: []const Value, p: *anyopaque) anyerror!Value {
     var items = std.ArrayListUnmanaged(Value){};
     var cur = a;
     while (cur == .cons) {
-        try items.append(m.allocator, cur.cons.car);
+        try items.append(m.nursery, cur.cons.car);
         cur = cur.cons.cdr;
     }
     var result = b;
@@ -485,7 +495,6 @@ fn appendFn(args: []const Value, p: *anyopaque) anyerror!Value {
         i -= 1;
         result = try m.makeCons(items.items[i], result);
     }
-    items.deinit(m.allocator);
     return result;
 }
 
@@ -495,8 +504,10 @@ fn load_(args: []const Value, p: *anyopaque) anyerror!Value {
     const m = vm(p);
     const file = std.fs.cwd().openFile(path.string, .{}) catch return error.TypeError;
     defer file.close();
+    // Use tenured for source content — it's referenced by closure bodies
     const content = try file.readToEndAlloc(m.allocator, 10 * 1024 * 1024);
     var rd = @import("reader.zig").Reader.init(content, m);
+    // Env on stack — not captured by closures in load context
     var env = Env.init(null);
     var result: Value = .nil;
     while (true) {

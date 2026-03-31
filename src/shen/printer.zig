@@ -8,7 +8,7 @@ const Vm = types.Vm;
 // ============================================================
 
 pub fn printValue(vm: *const Vm, val: Value, buf: *std.ArrayListUnmanaged(u8)) !void {
-    const alloc = vm.allocator;
+    const alloc = vm.nursery;
     switch (val) {
         .nil => try buf.appendSlice(alloc, "()"),
         .boolean => |b| try buf.appendSlice(alloc, if (b) "true" else "false"),
@@ -58,5 +58,5 @@ pub fn printValue(vm: *const Vm, val: Value, buf: *std.ArrayListUnmanaged(u8)) !
 pub fn valueToString(vm: *const Vm, val: Value) ![]const u8 {
     var buf: std.ArrayListUnmanaged(u8) = .{};
     try printValue(vm, val, &buf);
-    return buf.toOwnedSlice(vm.allocator);
+    return buf.toOwnedSlice(vm.nursery);
 }
