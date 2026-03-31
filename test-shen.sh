@@ -123,35 +123,17 @@ if [ "$1" = "--bench" ]; then
     echo -n "Boot RSS:      "
     /usr/bin/time -f '%M KB' sh -c "printf 'quit\n' | $SHEN boot $KL 2>/dev/null" 2>&1 | tail -1
 
-    # Compute benchmarks: individual runs with timeout, Shen-level CPU timing
+    # Compute benchmarks via hyperfine (includes boot overhead, but consistent)
     echo ""
-    echo "--- Compute (CPU time via get-time) ---"
+    echo "--- Compute (wall time incl. boot) ---"
 
-    run_bench() {
-        local name="$1" setup="$2" expr="$3"
-        local result
-        result=$(printf '%s\n%s\nquit\n' "$setup" \
-            "(let T0 (get-time run) _ $expr T1 (get-time run) (cn \"BENCH \" (str (- T1 T0))))" \
-            | timeout 30 $SHEN boot $KL 2>/dev/null | grep '^shen>> BENCH' | sed 's/^shen>> BENCH //')
-        if [ -n "$result" ]; then
-            printf '  %-14s %ss\n' "$name" "$result"
-        else
-            printf '  %-14s TIMEOUT\n' "$name"
-        fi
-    }
-
-    run_bench "fib(25)" \
-        "(define fib 0 -> 0 1 -> 1 N -> (+ (fib (- N 1)) (fib (- N 2))))" \
-        "(fib 25)"
-
-    run_bench "append 10k" \
-        "(define range-h 0 Acc -> Acc N Acc -> (range-h (- N 1) (cons N Acc)))
-(define range N -> (range-h N []))" \
-        "(length (append (range 5000) (range 5000)))"
-
-    run_bench "typecheck" \
-        "" \
-        "(shen.typecheck (lambda x (+ x 1)) (number --> number))"
+    hyperfine --warmup 1 --runs 5 \
+        -n "fib(25)" \
+        "printf '(defun fib (n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))\n(fib 25)\nquit\n' | $SHEN boot $KL 2>/dev/null" \
+        -n "append 4k" \
+        "printf '(defun range-h (n acc) (if (= n 0) acc (range-h (- n 1) (cons n acc))))\n(defun range (n) (range-h n ()))\n(length (append (range 2000) (range 2000)))\nquit\n' | $SHEN boot $KL 2>/dev/null" \
+        -n "typecheck" \
+        "printf '(shen.typecheck (lambda x (+ x 1)) (number --> number))\nquit\n' | $SHEN boot $KL 2>/dev/null"
 
     echo ""
 fi
