@@ -510,15 +510,22 @@ fn load_(args: []const Value, p: *anyopaque) anyerror!Value {
     // Env on stack — not captured by closures in load context
     var env = Env.init(null);
     var result: Value = .nil;
+    // Read and eval one expression at a time, resetting nursery between
+    // expressions to avoid OOM on large files.
     while (true) {
-        const exprs = rd.readAll() catch break;
-        for (exprs) |expr| {
-            result = eval_mod.eval(expr, &env, m) catch |err| {
-                std.debug.print("load error in {s}: {s}\n", .{ path.string, @errorName(err) });
+        const expr = rd.read() catch |err| switch (err) {
+            error.EndOfInput => break,
+            else => {
+                std.debug.print("load read error in {s}: {s}\n", .{ path.string, @errorName(err) });
                 return err;
-            };
-        }
-        break;
+            },
+        };
+        result = eval_mod.eval(expr, &env, m) catch |err| {
+            const msg = if (err == error.ShenError) m.last_error else @errorName(err);
+            std.debug.print("load error in {s}: {s}\n", .{ path.string, msg });
+            return err;
+        };
+        m.resetNursery();
     }
     return result;
 }

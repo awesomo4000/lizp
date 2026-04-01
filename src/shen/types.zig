@@ -221,7 +221,11 @@ pub const Nursery = struct {
         const self: *Nursery = @ptrCast(@alignCast(ctx));
         const align_val = alignment.toByteUnits();
         const aligned_pos = (self.pos + align_val - 1) & ~(align_val - 1);
-        if (aligned_pos + len > self.buf.len) return null; // OOM
+        if (aligned_pos + len > self.buf.len) {
+            // Nursery full — fall back to page_allocator (tenured-like).
+            // These allocations won't be freed on reset, but we avoid OOM.
+            return std.heap.page_allocator.rawAlloc(len, alignment, @returnAddress());
+        }
         const ptr = self.buf.ptr + aligned_pos;
         self.pos = aligned_pos + len;
         return ptr;

@@ -63,19 +63,20 @@ fn printUsage() void {
 fn evalString(input: []const u8, vm: *Vm) !void {
     var env = Env.init(null);
     var rd = Reader.init(input, vm);
-    const exprs = rd.readAll() catch |err| {
-        std.debug.print("read error: {s}\n", .{@errorName(err)});
-        return;
-    };
-
     var result: Value = .nil;
-    for (exprs) |expr| {
+    while (true) {
+        const expr = rd.read() catch |err| switch (err) {
+            error.EndOfInput => break,
+            else => {
+                std.debug.print("read error: {s}\n", .{@errorName(err)});
+                return;
+            },
+        };
         result = eval_mod.eval(expr, &env, vm) catch |err| {
             std.debug.print("eval error: {s}\n", .{@errorName(err)});
             return;
         };
     }
-
     const s = try printer_mod.valueToString(vm, result);
     std.debug.print("{s}\n", .{s});
     vm.resetNursery();
@@ -139,18 +140,22 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
         std.debug.print("Loading {s} ...", .{filename});
 
         var rd = Reader.init(content, vm);
-        const exprs = rd.readAll() catch |err| {
-            std.debug.print(" READ ERROR: {s}\n", .{@errorName(err)});
-            continue;
-        };
-
         var ok = true;
-        for (exprs) |expr| {
+        while (true) {
+            const expr = rd.read() catch |err| switch (err) {
+                error.EndOfInput => break,
+                else => {
+                    std.debug.print(" READ ERROR: {s}\n", .{@errorName(err)});
+                    ok = false;
+                    break;
+                },
+            };
             _ = eval_mod.eval(expr, env, vm) catch |err| {
                 std.debug.print(" EVAL ERROR: {s}\n", .{@errorName(err)});
                 ok = false;
                 break;
             };
+            vm.resetNursery();
         }
 
         if (ok) {
@@ -206,15 +211,19 @@ fn boot(kl_dir: []const u8, vm: *Vm) !void {
 
 fn evalSrc(src: []const u8, env: *Env, vm: *Vm) void {
     var rd = Reader.init(src, vm);
-    const exprs = rd.readAll() catch |err| {
-        std.debug.print("boot-init read error: {s}\n", .{@errorName(err)});
-        return;
-    };
-    for (exprs) |expr| {
+    while (true) {
+        const expr = rd.read() catch |err| switch (err) {
+            error.EndOfInput => break,
+            else => {
+                std.debug.print("boot-init read error: {s}\n", .{@errorName(err)});
+                return;
+            },
+        };
         _ = eval_mod.eval(expr, env, vm) catch |err| {
             const msg = if (err == error.ShenError) vm.last_error else @errorName(err);
             std.debug.print("boot-init eval error: {s}\n", .{msg});
         };
+        vm.resetNursery();
     }
 }
 
