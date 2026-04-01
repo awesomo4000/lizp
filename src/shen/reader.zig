@@ -47,6 +47,14 @@ pub const Reader = struct {
                 self.pos += 1;
                 return self.vm.internSym(";");
             },
+            '{' => {
+                self.pos += 1;
+                return self.vm.internSym("{");
+            },
+            '}' => {
+                self.pos += 1;
+                return self.vm.internSym("}");
+            },
             else => self.readAtom(),
         };
     }
@@ -149,7 +157,7 @@ pub const Reader = struct {
         const start = self.pos;
         while (self.pos < self.input.len) {
             switch (self.input[self.pos]) {
-                ' ', '\t', '\n', '\r', '(', ')', '[', ']', '"', ';' => break,
+                ' ', '\t', '\n', '\r', '(', ')', '[', ']', '{', '}', '"', ';' => break,
                 else => self.pos += 1,
             }
         }
