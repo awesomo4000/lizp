@@ -318,8 +318,12 @@ fn getTime(args: []const Value, p: *anyopaque) anyerror!Value {
     const mode = arg(args, 0);
     if (mode != .symbol) return error.TypeError;
     const name = vm(p).pool.getName(mode.symbol);
-    if (std.mem.eql(u8, name, "unix") or std.mem.eql(u8, name, "run")) {
-        return Value{ .integer = std.time.timestamp() };
+    if (std.mem.eql(u8, name, "unix")) {
+        return Value{ .float = @as(f64, @floatFromInt(std.time.timestamp())) };
+    }
+    if (std.mem.eql(u8, name, "run")) {
+        const ns = std.time.nanoTimestamp();
+        return Value{ .float = @as(f64, @floatFromInt(ns)) / 1_000_000_000.0 };
     }
     return error.TypeError;
 }
