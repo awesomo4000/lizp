@@ -59,7 +59,9 @@ fn synthesizeStruct(comptime spec: Value) type {
         field_count += 1;
     }
 
-    var fields: [field_count]std.builtin.Type.StructField = undefined;
+    var field_names: [field_count][]const u8 = undefined;
+    var field_types: [field_count]type = undefined;
+    var field_attrs: [field_count]std.builtin.Type.StructField.Attributes = undefined;
     var i: usize = 0;
     var cur = fields_list;
     while (cur != .nil) : ({
@@ -69,21 +71,12 @@ fn synthesizeStruct(comptime spec: Value) type {
         const field_spec = lisp.car(cur);
         const fname = lisp.cadr(field_spec).symbol;
         const ftype_spec = lisp.car(lisp.cdr(lisp.cdr(field_spec)));
-        fields[i] = .{
-            .name = sentinelStr(fname),
-            .type = synthesizeType(ftype_spec),
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = 1,
-        };
+        field_names[i] = fname;
+        field_types[i] = synthesizeType(ftype_spec);
+        field_attrs[i] = .{ .@"align" = 1 };
     }
 
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &fields,
-        .decls = &.{},
-        .is_tuple = false,
-    } });
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 }
 
 fn synthesizeEnum(comptime spec: Value) type {
@@ -95,25 +88,20 @@ fn synthesizeEnum(comptime spec: Value) type {
         count += 1;
     }
 
-    var fields: [count]std.builtin.Type.EnumField = undefined;
+    const Tag = std.math.IntFittingRange(0, if (count == 0) 0 else count - 1);
+    var field_names: [count][]const u8 = undefined;
+    var field_values: [count]Tag = undefined;
     var i: usize = 0;
     var cur = variants_list;
     while (cur != .nil) : ({
         cur = lisp.cdr(cur);
         i += 1;
     }) {
-        fields[i] = .{
-            .name = sentinelStr(lisp.car(cur).symbol),
-            .value = i,
-        };
+        field_names[i] = lisp.car(cur).symbol;
+        field_values[i] = @intCast(i);
     }
 
-    return @Type(.{ .@"enum" = .{
-        .tag_type = std.math.IntFittingRange(0, if (count == 0) 0 else count - 1),
-        .fields = &fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
+    return @Enum(Tag, .exhaustive, &field_names, &field_values);
 }
 
 fn synthesizeUnion(comptime spec: Value) type {
@@ -125,7 +113,11 @@ fn synthesizeUnion(comptime spec: Value) type {
         count += 1;
     }
 
-    var fields: [count]std.builtin.Type.UnionField = undefined;
+    var field_names: [count][]const u8 = undefined;
+    var field_types: [count]type = undefined;
+    var field_attrs: [count]std.builtin.Type.UnionField.Attributes = undefined;
+    const TagInt = std.math.IntFittingRange(0, if (count == 0) 0 else count - 1);
+    var tag_values: [count]TagInt = undefined;
     var i: usize = 0;
     var cur = variants_list;
     while (cur != .nil) : ({
@@ -133,30 +125,14 @@ fn synthesizeUnion(comptime spec: Value) type {
         i += 1;
     }) {
         const variant = lisp.car(cur);
-        fields[i] = .{
-            .name = sentinelStr(lisp.cadr(variant).symbol),
-            .type = synthesizeType(lisp.car(lisp.cdr(lisp.cdr(variant)))),
-            .alignment = 1,
-        };
+        field_names[i] = lisp.cadr(variant).symbol;
+        field_types[i] = synthesizeType(lisp.car(lisp.cdr(lisp.cdr(variant))));
+        field_attrs[i] = .{ .@"align" = 1 };
+        tag_values[i] = @intCast(i);
     }
 
-    var enum_fields: [count]std.builtin.Type.EnumField = undefined;
-    for (fields, 0..) |f, j| {
-        enum_fields[j] = .{ .name = f.name, .value = j };
-    }
-    const TagEnum = @Type(.{ .@"enum" = .{
-        .tag_type = std.math.IntFittingRange(0, if (count == 0) 0 else count - 1),
-        .fields = &enum_fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
-
-    return @Type(.{ .@"union" = .{
-        .layout = .auto,
-        .tag_type = TagEnum,
-        .fields = &fields,
-        .decls = &.{},
-    } });
+    const TagEnum = @Enum(TagInt, .exhaustive, &field_names, &tag_values);
+    return @Union(.auto, TagEnum, &field_names, &field_types, &field_attrs);
 }
 
 fn synthesizeArray(comptime spec: Value) type {
@@ -231,8 +207,11 @@ pub fn synthesizeProtocol(comptime spec: Value) type {
         count += 1;
     }
 
-    var union_fields: [count]std.builtin.Type.UnionField = undefined;
-    var enum_fields: [count]std.builtin.Type.EnumField = undefined;
+    var field_names: [count][]const u8 = undefined;
+    var field_types: [count]type = undefined;
+    var field_attrs: [count]std.builtin.Type.UnionField.Attributes = undefined;
+    const TagInt = std.math.IntFittingRange(0, if (count == 0) 0 else count - 1);
+    var tag_values: [count]TagInt = undefined;
 
     var i: usize = 0;
     var cur = messages;
@@ -249,27 +228,14 @@ pub fn synthesizeProtocol(comptime spec: Value) type {
         } };
         const MsgType = synthesizeType(struct_spec);
 
-        enum_fields[i] = .{ .name = sentinelStr(msg_name), .value = i };
-        union_fields[i] = .{
-            .name = sentinelStr(msg_name),
-            .type = MsgType,
-            .alignment = 1,
-        };
+        field_names[i] = msg_name;
+        field_types[i] = MsgType;
+        field_attrs[i] = .{ .@"align" = 1 };
+        tag_values[i] = @intCast(i);
     }
 
-    const TagEnum = @Type(.{ .@"enum" = .{
-        .tag_type = std.math.IntFittingRange(0, if (count == 0) 0 else count - 1),
-        .fields = &enum_fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
-
-    return @Type(.{ .@"union" = .{
-        .layout = .auto,
-        .tag_type = TagEnum,
-        .fields = &union_fields,
-        .decls = &.{},
-    } });
+    const TagEnum = @Enum(TagInt, .exhaustive, &field_names, &tag_values);
+    return @Union(.auto, TagEnum, &field_names, &field_types, &field_attrs);
 }
 
 // --- Effect tracking via phantom types ---
@@ -281,7 +247,9 @@ pub fn EffectSet(comptime effects: Value) type {
         count += 1;
     }
 
-    var fields: [count]std.builtin.Type.StructField = undefined;
+    var field_names: [count][]const u8 = undefined;
+    var field_types: [count]type = undefined;
+    var field_attrs: [count]std.builtin.Type.StructField.Attributes = undefined;
     var i: usize = 0;
     var cur = effects;
     while (cur != .nil) : ({
@@ -289,21 +257,12 @@ pub fn EffectSet(comptime effects: Value) type {
         i += 1;
     }) {
         const eff_name = lisp.car(cur).symbol;
-        fields[i] = .{
-            .name = sentinelStr(eff_name),
-            .type = void,
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = 1,
-        };
+        field_names[i] = eff_name;
+        field_types[i] = void;
+        field_attrs[i] = .{ .@"align" = 1 };
     }
 
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &fields,
-        .decls = &.{},
-        .is_tuple = false,
-    } });
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 }
 
 pub fn hasEffect(comptime T: type, comptime name: []const u8) bool {
@@ -320,20 +279,23 @@ pub fn removeEffect(comptime T: type, comptime name: []const u8) type {
     for (fields) |f| {
         if (!eql(f.name, name)) new_count += 1;
     }
-    var new_fields: [new_count]std.builtin.Type.StructField = undefined;
+    var field_names: [new_count][]const u8 = undefined;
+    var field_types: [new_count]type = undefined;
+    var field_attrs: [new_count]std.builtin.Type.StructField.Attributes = undefined;
     var j: usize = 0;
     for (fields) |f| {
         if (!eql(f.name, name)) {
-            new_fields[j] = f;
+            field_names[j] = f.name;
+            field_types[j] = f.type;
+            field_attrs[j] = .{
+                .@"comptime" = f.is_comptime,
+                .@"align" = f.alignment,
+                .default_value_ptr = f.default_value_ptr,
+            };
             j += 1;
         }
     }
-    return @Type(.{ .@"struct" = .{
-        .layout = .auto,
-        .fields = &new_fields,
-        .decls = &.{},
-        .is_tuple = false,
-    } });
+    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
 }
 
 pub fn isPure(comptime T: type) bool {
@@ -385,8 +347,4 @@ pub fn assertLispEq(comptime expr: []const u8, comptime expected: []const u8) vo
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
-}
-
-fn sentinelStr(comptime s: []const u8) [:0]const u8 {
-    return (s ++ &[_]u8{0})[0..s.len :0];
 }

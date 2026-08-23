@@ -51,7 +51,7 @@ The compiler supports a subset for native codegen:
 
 ## Build
 
-Requires Zig 0.15.2.
+Requires Zig 0.16.0.
 
 ```bash
 zig build run    # build and run the example
