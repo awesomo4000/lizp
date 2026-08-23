@@ -1,0 +1,11 @@
+#!/usr/bin/env lizp
+
+(defn sum-to [n]
+  (loop [i n
+         total 0]
+    (if (= i 0)
+      total
+      (recur (- i 1)
+             (+ total i)))))
+
+(sum-to 100000)

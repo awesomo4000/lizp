@@ -1,13 +1,17 @@
 .{
-    .name = .ct_lisp,
-    .version = "0.0.0",
-    .fingerprint = 0x6f237dd64356a371, // Changing this has security and trust implications.
+    .name = .lizp,
+    .version = "0.3.3",
+    .fingerprint = 0x92678748fcb4be74,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .poolside = .{ .path = "vendor/poolside" },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "README.md",
         "src",
+        "examples",
+        "vendor",
+        "README.md",
     },
 }

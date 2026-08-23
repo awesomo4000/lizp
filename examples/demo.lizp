@@ -1,0 +1,15 @@
+#!/usr/bin/env lizp
+
+(define (range-from i end)
+  (if (= i end)
+      '()
+      (cons i (range-from (+ i 1) end))))
+
+(define (map f xs)
+  (if (null? xs)
+      '()
+      (cons (f (car xs))
+            (map f (cdr xs)))))
+
+(define (square x) (* x x))
+(map square (range-from 0 8))
